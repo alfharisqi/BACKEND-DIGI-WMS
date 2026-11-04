@@ -14,13 +14,24 @@ import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
 export async function orang4DashboardRoutes(app: FastifyInstance) {
   // 1. GET Status Kesehatan Server, PostgreSQL & Broker EMQX
   app.get('/api/health', async () => {
+    const ledgerStocks = getCalculatedLedgerStock();
     return {
       status: 'OK',
       service: 'DIGI WMS Backend API — Modul Orang 4',
-      database_mode: isPostgresConnected ? 'POSTGRESQL_DOCKER' : 'IN_MEMORY_LEDGER_READY',
-      emqx_mqtt: mqttClient?.connected ? 'CONNECTED' : 'STANDBY_SIMULATION',
+      database_mode: isPostgresConnected
+        ? 'POSTGRESQL_16_DOCKER (Port 5432)'
+        : 'IN_MEMORY_LEDGER_READY (Auto Fallback)',
+      emqx_mqtt: mqttClient?.connected
+        ? 'CONNECTED (TCP 1883 / WS 8083)'
+        : 'STANDBY_SIMULATION (Siap Konek EMQX)',
       uptime_seconds: Math.floor(process.uptime()),
-      rfid_freq: memoryStore.settings.rfid_frequency,
+      rfid_freq: memoryStore.settings.rfid_frequency || '920 - 923 MHz (Indonesia)',
+      stats: {
+        total_users: memoryStore.users.length,
+        total_skus: ledgerStocks.length,
+        total_tags: memoryStore.tags.length,
+        total_audit_logs: memoryStore.audit_logs.length,
+      },
       timestamp: new Date().toISOString(),
     };
   });
@@ -56,7 +67,6 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       low_stock_items = ledgerStocks.filter((s) => s.stock_status === 'STOK_RENDAH');
     }
 
-    // Hitung distribusi stok per kategori untuk chart Orang 4
     const categoryMap: Record<string, number> = {};
     all_stocks.forEach((item) => {
       categoryMap[item.category] = (categoryMap[item.category] || 0) + Number(item.current_stock);
@@ -66,8 +76,43 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       stock,
     }));
 
+    const days7 = [
+      { label: '6 Mei', inbound: 45, outbound: 18, opname: 40 },
+      { label: '7 Mei', inbound: 60, outbound: 24, opname: 55 },
+      { label: '8 Mei', inbound: 30, outbound: 15, opname: 35 },
+      { label: '9 Mei', inbound: 85, outbound: 32, opname: 75 },
+      { label: '10 Mei', inbound: 50, outbound: 20, opname: 48 },
+      { label: '11 Mei', inbound: 70, outbound: 28, opname: 65 },
+      { label: 'Hari Ini', inbound: 95, outbound: 35, opname: 90 },
+    ];
+
+    const days30 = [
+      { label: 'Minggu 1', inbound: 210, outbound: 95, opname: 195 },
+      { label: 'Minggu 2', inbound: 320, outbound: 140, opname: 300 },
+      { label: 'Minggu 3', inbound: 280, outbound: 120, opname: 270 },
+      { label: 'Minggu 4', inbound: 390, outbound: 165, opname: 375 },
+    ];
+
+    const summaryData = {
+      kpis: {
+        totalSkus: all_stocks.length,
+        totalPhysicalStock: total_stock,
+        activeRfidTags: active_rfid_tags,
+        gateAlarmsCount: memoryStore.gate_events?.length || 2,
+        totalInbound: total_inbound,
+      },
+      chartData: {
+        days7,
+        days30,
+      },
+      categoryDistribution: category_distribution,
+      lowStockItems: low_stock_items,
+    };
+
     return {
+      status: 'ok',
       success: true,
+      data: summaryData,
       kpi: {
         total_stock,
         total_inbound,
@@ -75,21 +120,6 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         total_Zones: memoryStore.locations.length,
         low_stock_items,
         category_distribution,
-        chart_7d: [
-          { label: '6 Mei', inbound: 45, putaway: 40, total: 190 },
-          { label: '7 Mei', inbound: 60, putaway: 55, total: 215 },
-          { label: '8 Mei', inbound: 30, putaway: 35, total: 230 },
-          { label: '9 Mei', inbound: 85, putaway: 75, total: 255 },
-          { label: '10 Mei', inbound: 50, putaway: 48, total: 268 },
-          { label: '11 Mei', inbound: 70, putaway: 65, total: 275 },
-          { label: 'Hari Ini', inbound: 95, putaway: 90, total: total_stock },
-        ],
-        chart_30d: [
-          { label: 'Minggu 1', inbound: 210, putaway: 195, total: 180 },
-          { label: 'Minggu 2', inbound: 320, putaway: 300, total: 225 },
-          { label: 'Minggu 3', inbound: 280, putaway: 270, total: 260 },
-          { label: 'Minggu 4', inbound: 390, putaway: 375, total: total_stock },
-        ],
       },
     };
   });
@@ -107,15 +137,24 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         return reply.code(404).send({ success: false, message: 'Pengguna tidak ditemukan' });
       }
       const user = res.rows[0];
+      if (!user.is_active) {
+        return reply
+          .code(403)
+          .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan!' });
+      }
       await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
         user.id,
         'USER_LOGIN_SWITCH',
         JSON.stringify({ username: user.username, role: user.role }),
       ]);
+      const token = `jwt-digiwms-${user.id}-${Date.now()}`;
       return {
+        status: 'ok',
         success: true,
-        token: `jwt-digiwms-${user.id}-${Date.now()}`,
+        message: `Berhasil beralih ke sesi ${user.full_name} (Role: ${user.role})`,
+        token,
         user,
+        data: { user, token },
       };
     }
 
@@ -123,20 +162,39 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     if (!user) {
       return reply.code(404).send({ success: false, message: 'Pengguna tidak ditemukan' });
     }
+    if (!user.is_active) {
+      return reply
+        .code(403)
+        .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan!' });
+    }
 
     memoryStore.audit_logs.unshift({
       id: memoryStore.audit_logs.length + 1,
       user_id: user.id,
       user_name: user.full_name,
       action: 'USER_LOGIN_SWITCH',
-      payload: { username: user.username, role: user.role },
+      payload: {
+        username: user.username,
+        role: user.role,
+        note: `Sesi aktif beralih ke ${user.full_name} (${user.role})`,
+      },
       created_at: new Date().toISOString(),
     });
 
+    publishRealtimeEvent('digiwms/audit/login', {
+      username: user.username,
+      full_name: user.full_name,
+      role: user.role,
+    });
+
+    const token = `jwt-digiwms-${user.id}-${Date.now()}`;
     return {
+      status: 'ok',
       success: true,
-      token: `jwt-digiwms-${user.id}-${Date.now()}`,
+      message: `Berhasil beralih ke sesi ${user.full_name} (Role: ${user.role})`,
+      token,
       user,
+      data: { user, token },
     };
   });
 
@@ -146,14 +204,14 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       const res = await db.query(
         'SELECT id, username, full_name, role, is_active, created_at FROM users ORDER BY id ASC'
       );
-      return { success: true, data: res.rows };
+      return { status: 'ok', success: true, data: res.rows };
     }
-    return { success: true, data: memoryStore.users };
+    return { status: 'ok', success: true, data: memoryStore.users };
   });
 
   // 5. POST Tambah Pengguna Baru (Manajemen Staf Gudang oleh Orang 4)
   app.post('/api/users', async (request, reply) => {
-    const { username, full_name, role = 'WAREHOUSE_STAFF' } = request.body as {
+    const { username, full_name, role = 'OPERATOR' } = request.body as {
       username: string;
       full_name: string;
       role?: string;
@@ -170,7 +228,20 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         'CREATE_USER',
         JSON.stringify({ username, full_name, role }),
       ]);
-      return reply.code(201).send({ success: true, data: res.rows[0] });
+      return reply.code(201).send({
+        status: 'ok',
+        success: true,
+        message: `Personel ${full_name} (${role}) berhasil didaftarkan`,
+        data: res.rows[0],
+      });
+    }
+
+    if (memoryStore.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: `Username @${username} sudah terdaftar!`,
+      });
     }
 
     const newUser = {
@@ -187,11 +258,21 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       user_id: 1,
       user_name: 'Admin / Supervisor',
       action: 'CREATE_USER',
-      payload: { username, full_name, role },
+      payload: {
+        username,
+        full_name,
+        role,
+        note: `Menambahkan akun personel baru @${username} (${role})`,
+      },
       created_at: new Date().toISOString(),
     });
 
-    return reply.code(201).send({ success: true, data: newUser });
+    return reply.code(201).send({
+      status: 'ok',
+      success: true,
+      message: `Personel ${full_name} (${role}) berhasil didaftarkan`,
+      data: newUser,
+    });
   });
 
   // 6. PATCH Aktifkan / Nonaktifkan Status Pengguna
@@ -205,7 +286,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
          RETURNING id, username, full_name, role, is_active, created_at`,
         [userId]
       );
-      return reply.send({ success: true, data: res.rows[0] });
+      return reply.send({ status: 'ok', success: true, data: res.rows[0] });
     }
 
     const target = memoryStore.users.find((u) => u.id === userId);
@@ -216,35 +297,83 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         user_id: 1,
         user_name: 'Admin / Supervisor',
         action: 'TOGGLE_USER_STATUS',
-        payload: { username: target.username, is_active: target.is_active },
+        payload: {
+          username: target.username,
+          role: target.role,
+          is_active: target.is_active,
+          note: `Status akun @${target.username} diubah menjadi ${
+            target.is_active ? 'AKTIF' : 'NONAKTIF'
+          }`,
+        },
         created_at: new Date().toISOString(),
       });
     }
-    return reply.send({ success: true, data: target });
+    return reply.send({ status: 'ok', success: true, data: target });
   });
 
   // 7. GET Riwayat Audit Log Keamanan Sistem
-  app.get('/api/audit-logs', async () => {
+  app.get('/api/audit-logs', async (request) => {
+    const { role } = (request.query as { role?: string }) || {};
+    let rawLogs: Array<Record<string, unknown>> = [];
+
     if (isPostgresConnected) {
       const res = await db.query(`
-        SELECT a.*, COALESCE(u.full_name, 'System Admin') AS user_name
+        SELECT a.*, COALESCE(u.full_name, 'System Admin') AS user_name, COALESCE(u.role, 'ADMIN') AS user_role
         FROM audit_logs a
         LEFT JOIN users u ON a.user_id = u.id
         ORDER BY a.created_at DESC
         LIMIT 50
       `);
-      return { success: true, data: res.rows };
+      rawLogs = res.rows;
+    } else {
+      rawLogs = memoryStore.audit_logs as unknown as Array<Record<string, unknown>>;
     }
-    return { success: true, data: memoryStore.audit_logs };
+
+    const normalized = rawLogs.map((log) => {
+      const payloadObj =
+        typeof log.payload === 'object' && log.payload !== null
+          ? (log.payload as Record<string, unknown>)
+          : {};
+      const actorRole = String(payloadObj.role || log.user_role || 'ADMIN');
+      const actorUsername = String(log.user_name || payloadObj.username || 'admin_wms');
+      const details = String(
+        payloadObj.note || JSON.stringify(payloadObj)
+      );
+      return {
+        id: log.id,
+        actor_username: actorUsername,
+        actor_role: actorRole,
+        action: log.action,
+        details,
+        created_at: log.created_at,
+      };
+    });
+
+    const filtered =
+      role && role !== 'ALL'
+        ? normalized.filter((l) => l.actor_role.toUpperCase().includes(role.toUpperCase()))
+        : normalized;
+
+    return { status: 'ok', success: true, data: filtered };
   });
 
   // 8. GET & PUT Pengaturan Sistem Gudang & Parameter RFID
   app.get('/api/settings', async () => {
-    return { success: true, data: memoryStore.settings };
+    const s = memoryStore.settings as Record<string, unknown>;
+    const enriched = {
+      ...s,
+      warehouse_name: s.warehouse_name || 'Gudang Utama Jakarta Pusat',
+      rfid_frequency: s.rfid_frequency || '920 - 923 MHz (Indonesia)',
+      rfid_gate_power_dbm: s.rfid_gate_power_dbm ?? 29,
+      anti_collision_mode:
+        s.anti_collision_mode || 'Dense Reader Mode (M=4) - EPCglobal Gen2',
+      alarm_siren_enabled: s.alarm_siren_enabled ?? true,
+    };
+    return { status: 'ok', success: true, data: enriched };
   });
 
   app.put('/api/settings', async (request) => {
-    const body = request.body as Partial<typeof memoryStore.settings>;
+    const body = request.body as Record<string, unknown>;
     memoryStore.settings = {
       ...memoryStore.settings,
       ...body,
@@ -254,44 +383,54 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     memoryStore.audit_logs.unshift({
       id: memoryStore.audit_logs.length + 1,
       user_id: 1,
-      user_name: 'Sarah Jenkins',
+      user_name: String(body.updated_by || 'Sarah Jenkins'),
       action: 'UPDATE_SYSTEM_SETTINGS',
-      payload: body as Record<string, unknown>,
+      payload: {
+        role: 'ADMIN',
+        note: `Memperbarui pengaturan gudang (${memoryStore.settings.warehouse_name}) & daya antena RFID`,
+      },
       created_at: new Date().toISOString(),
     });
 
-    publishRealtimeEvent('wms/stock/realtime', {
+    publishRealtimeEvent('digiwms/settings/updated', {
       event: 'SYSTEM_SETTINGS_UPDATED',
       settings: memoryStore.settings,
     });
 
-    return { success: true, data: memoryStore.settings };
+    return { status: 'ok', success: true, data: memoryStore.settings };
   });
 
   // 9. POST Tes Broadcast Pesan Real-time via EMQX MQTT
   app.post('/api/mqtt/test-publish', async (request) => {
-    const { topic = 'wms/stock/realtime', message = 'Ping Real-time dari Dashboard Orang 4!' } =
-      (request.body as { topic?: string; message?: string }) || {};
+    const body = (request.body as Record<string, unknown>) || {};
+    const topic = String(body.topic || 'digiwms/rfid/gate-alarm');
+    const payload = (body.payload as Record<string, unknown>) || {
+      message: String(body.message || 'Ping Real-time dari Dashboard Orang 4!'),
+    };
 
     publishRealtimeEvent(topic, {
       event: 'MANUAL_BROADCAST_ORANG4',
-      testMessage: message,
+      ...payload,
       sender: 'Modul Orang 4 (Dashboard & Server)',
     });
 
     memoryStore.audit_logs.unshift({
       id: memoryStore.audit_logs.length + 1,
       user_id: 1,
-      user_name: 'Sarah Jenkins',
+      user_name: String(payload.operator || 'Sarah Jenkins'),
       action: 'MQTT_TEST_BROADCAST',
-      payload: { topic, message },
+      payload: {
+        role: 'SUPERVISOR',
+        note: `Broadcast paket uji MQTT ke topik ${topic}`,
+      },
       created_at: new Date().toISOString(),
     });
 
     return {
+      status: 'ok',
       success: true,
       topic,
-      message,
+      payload,
       emqxConnected: Boolean(mqttClient?.connected),
     };
   });
