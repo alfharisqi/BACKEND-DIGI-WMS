@@ -1,0 +1,33 @@
+-- ============================================================================
+-- DIGI WMS: Orang 4 Dashboard & Supabase Compatibility Migration
+-- Views, User Authentication columns & Audit Logs adjustments
+-- ============================================================================
+
+-- 1. Ensure username, password, password_hash in users table
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS username text;
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password text DEFAULT '123456';
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password_hash text;
+
+UPDATE public.users SET username = split_part(email, '@', 1) WHERE username IS NULL;
+UPDATE public.users SET password = '123456' WHERE password IS NULL;
+
+-- 2. Audit logs payload column & default entity_type
+ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS payload jsonb;
+ALTER TABLE public.audit_logs ALTER COLUMN entity_type DROP NOT NULL;
+ALTER TABLE public.audit_logs ALTER COLUMN entity_type SET DEFAULT 'SYSTEM';
+
+-- 3. View v_product_stock_ledger for Live Dashboard KPI & Stock Ledger
+CREATE OR REPLACE VIEW public.v_product_stock_ledger AS
+SELECT 
+    p.id AS product_id,
+    p.sku,
+    p.name AS product_name,
+    p.category,
+    COALESCE(p.min_stock_threshold, 20) AS min_stock_alert,
+    COALESCE(p.current_stock, 0)::INT AS current_stock,
+    CASE 
+        WHEN COALESCE(p.current_stock, 0) <= COALESCE(p.min_stock_threshold, 20) THEN 'STOK_RENDAH'
+        ELSE 'AMAN'
+    END AS stock_status
+FROM public.products p
+ORDER BY p.name ASC;
