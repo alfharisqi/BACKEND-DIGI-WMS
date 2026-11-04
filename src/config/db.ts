@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const db = new Pool({
   connectionString:
@@ -21,11 +22,26 @@ export let isPostgresConnected = false;
  */
 export const memoryStore = {
   users: [
-    { id: 1, username: 'sarah.jenkins', full_name: 'Sarah Jenkins', role: 'SUPERVISOR', is_active: true, created_at: new Date().toISOString() },
-    { id: 2, username: 'admin.wms', full_name: 'Budi Santoso (Admin)', role: 'ADMIN', is_active: true, created_at: new Date().toISOString() },
-    { id: 3, username: 'operator.inbound', full_name: 'Andi Pratama (Inbound)', role: 'WAREHOUSE_STAFF', is_active: true, created_at: new Date().toISOString() },
-    { id: 4, username: 'security.gate', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: new Date().toISOString() },
+    { id: 1, username: 'sarah.jenkins', full_name: 'Sarah Jenkins', role: 'SUPERVISOR', is_active: true, created_at: '2026-05-01T08:00:00.000Z' },
+    { id: 2, username: 'admin.wms', full_name: 'Budi Santoso (Admin)', role: 'ADMIN', is_active: true, created_at: '2026-05-01T08:05:00.000Z' },
+    { id: 3, username: 'operator.inbound', full_name: 'Andi Pratama (Inbound)', role: 'WAREHOUSE_STAFF', is_active: true, created_at: '2026-05-02T09:00:00.000Z' },
+    { id: 4, username: 'security.gate', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: '2026-05-02T09:30:00.000Z' },
   ],
+  audit_logs: [
+    { id: 1, user_id: 2, user_name: 'Budi Santoso (Admin)', action: 'INIT_SYSTEM', payload: { info: 'Inisialisasi Server DIGI WMS & Broker EMQX' }, created_at: '2026-05-12T08:00:00.000Z' },
+    { id: 2, user_id: 1, user_name: 'Sarah Jenkins', action: 'VERIFY_GRN', payload: { po_number: 'PO-2026-8901', qty: 150 }, created_at: '2026-05-12T09:30:00.000Z' },
+    { id: 3, user_id: 1, user_name: 'Sarah Jenkins', action: 'UPDATE_RFID_SETTINGS', payload: { rssi_threshold: '-65 dBm', freq: '920-923 MHz' }, created_at: '2026-05-12T10:15:00.000Z' },
+  ],
+  settings: {
+    warehouse_name: 'Gudang Utama DIGI WMS — Jakarta Pusat',
+    rfid_frequency: '920 - 923 MHz (Standar Kominfo Indonesia)',
+    gate_rssi_threshold_dbm: -65,
+    dedup_window_seconds: 5,
+    default_min_stock_alert: 20,
+    emqx_ws_url: 'ws://localhost:8083/mqtt',
+    auto_low_stock_notif: true,
+    updated_at: new Date().toISOString(),
+  },
   products: [
     { id: 1, sku: 'SKU-012', name: 'Mouse Wireless Ergonomic', category: 'Aksesoris Komputer', min_stock_alert: 20, price: 185000 },
     { id: 2, sku: 'SKU-018', name: 'Keyboard Mechanical RGB', category: 'Periferal Gaming', min_stock_alert: 20, price: 650000 },
