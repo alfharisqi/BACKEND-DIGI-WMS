@@ -19,7 +19,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       status: 'OK',
       service: 'DIGI WMS Backend API — Modul Orang 4',
       database_mode: isPostgresConnected
-        ? 'POSTGRESQL_16_DOCKER (Port 5432)'
+        ? process.env.DATABASE_URL?.includes('supabase')
+          ? 'SUPABASE_CLOUD_POSTGRES (Port 6543/5432)'
+          : 'POSTGRESQL_16_DOCKER (Port 5432)'
         : 'IN_MEMORY_LEDGER_READY (Auto Fallback)',
       emqx_mqtt: mqttClient?.connected
         ? 'CONNECTED (TCP 1883 / WS 8083)'
