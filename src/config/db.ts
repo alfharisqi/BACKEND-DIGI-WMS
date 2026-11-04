@@ -11,7 +11,12 @@ export const db = new Pool({
     'postgresql://digiwms:digiwms_pass@localhost:5432/digiwms_db',
   max: 15,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 5000,
+  ssl:
+    process.env.DATABASE_URL?.includes('supabase.com') ||
+    process.env.DATABASE_URL?.includes('sslmode=require')
+      ? { rejectUnauthorized: false }
+      : undefined,
 });
 
 export let isPostgresConnected = false;
@@ -106,10 +111,12 @@ export async function checkDatabaseConnection(): Promise<boolean> {
     isPostgresConnected = true;
     console.log(`[PostgreSQL] Terhubung ke database pada: ${res.rows[0].server_time}`);
     return true;
-  } catch {
+  } catch (err: any) {
     isPostgresConnected = false;
     console.log(
-      '[Database] Docker PostgreSQL belum aktif -> Menggunakan In-Memory Ledger Store (Siap Pakai)'
+      `[Database] PostgreSQL (${
+        process.env.DATABASE_URL?.includes('supabase') ? 'Supabase Cloud' : 'Local/Docker'
+      }) belum terhubung (${err?.message || 'Offline'}) -> Menggunakan In-Memory Ledger Store (Siap Pakai)`
     );
     return false;
   }
