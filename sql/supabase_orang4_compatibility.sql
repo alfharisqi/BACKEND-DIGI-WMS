@@ -36,3 +36,8 @@ SELECT
     END AS stock_status
 FROM public.products p
 ORDER BY p.name ASC;
+
+-- 4. Update users_role_check constraint to allow all standard WMS roles
+ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE public.users ADD CONSTRAINT users_role_check 
+CHECK (role IN ('ADMIN', 'SUPERVISOR', 'OPERATOR', 'WAREHOUSE_STAFF', 'SECURITY', 'CASHIER', 'KASIR_POS'));
