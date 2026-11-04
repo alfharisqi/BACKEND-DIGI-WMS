@@ -1,6 +1,8 @@
 import { FastifyInstance } from 'fastify';
+import bcrypt from 'bcryptjs';
 import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
 import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
+import { generateToken, authenticate, requireRoles } from '../../middleware/auth';
 
 /**
  * ============================================================================
@@ -19,7 +21,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       status: 'OK',
       service: 'DIGI WMS Backend API — Modul Orang 4',
       database_mode: isPostgresConnected
-        ? 'POSTGRESQL_16_DOCKER (Port 5432)'
+        ? process.env.DATABASE_URL?.includes('supabase')
+          ? 'SUPABASE_CLOUD_POSTGRES (Port 6543/5432)'
+          : 'POSTGRESQL_16_DOCKER (Port 5432)'
         : 'IN_MEMORY_LEDGER_READY (Auto Fallback)',
       emqx_mqtt: mqttClient?.connected
         ? 'CONNECTED (TCP 1883 / WS 8083)'
@@ -124,14 +128,20 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     };
   });
 
-  // 3. POST Login Resmi (Validasi Username & Password + Catat ke Audit Log)
+  // 3. POST Login Resmi (Validasi Username & Password Hash + Catat ke Audit Log)
   app.post('/api/auth/login', async (request, reply) => {
     const { username, password } = request.body as { username: string; password?: string };
 
+    if (!username || !password) {
+      return reply
+        .code(400)
+        .send({ success: false, message: 'Username dan password wajib diisi!' });
+    }
+
     if (isPostgresConnected) {
       const res = await db.query(
-        'SELECT id, username, full_name, role, is_active FROM users WHERE username = $1',
-        [username]
+        'SELECT id, username, password_hash, full_name, role, is_active FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)',
+        [username.trim()]
       );
       if (res.rows.length === 0) {
         return reply
@@ -144,43 +154,56 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           .code(403)
           .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan oleh Admin!' });
       }
+
+      // Verifikasi kata sandi ter-hash dengan bcrypt
+      const isMatch = await bcrypt.compare(password, user.password_hash || '');
+      if (!isMatch) {
+        return reply
+          .code(401)
+          .send({ success: false, message: 'Username atau password salah!' });
+      }
+
       await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
         user.id,
         'USER_LOGIN',
         JSON.stringify({
           username: user.username,
           role: user.role,
-          note: `Login berhasil ke sistem DIGI WMS (${user.role})`,
+          note: `Login berhasil ke sistem DIGI WMS (${user.role}) - Verified with bcrypt`,
         }),
       ]);
-      const token = `jwt-digiwms-${user.id}-${Date.now()}`;
+
+      const { password_hash: _ph, ...safeUser } = user;
+      const token = generateToken(safeUser);
       return {
         status: 'ok',
         success: true,
         message: `Selamat datang, ${user.full_name} (${user.role})`,
         token,
-        user,
-        data: { user, token },
+        user: safeUser,
+        data: { user: safeUser, token },
       };
     }
 
     const user = memoryStore.users.find(
-      (u) => u.username.toLowerCase() === String(username || '').toLowerCase()
+      (u) => u.username.toLowerCase() === String(username || '').trim().toLowerCase()
     );
     if (!user) {
       return reply
         .code(401)
-        .send({ success: false, message: 'Username tidak ditemukan!' });
-    }
-    if (password !== undefined && user.password && password !== user.password) {
-      return reply
-        .code(401)
-        .send({ success: false, message: 'Password yang Anda masukkan salah!' });
+        .send({ success: false, message: 'Username atau password salah!' });
     }
     if (!user.is_active) {
       return reply
         .code(403)
         .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan oleh Admin!' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash || '');
+    if (!isMatch) {
+      return reply
+        .code(401)
+        .send({ success: false, message: 'Username atau password salah!' });
     }
 
     memoryStore.audit_logs.unshift({
@@ -191,7 +214,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       payload: {
         username: user.username,
         role: user.role,
-        note: `Login berhasil ke portal DIGI WMS (${user.role})`,
+        note: `Login berhasil ke portal DIGI WMS (${user.role}) - Verified with bcrypt`,
       },
       created_at: new Date().toISOString(),
     });
@@ -202,16 +225,8 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       role: user.role,
     });
 
-    const safeUser = {
-      id: user.id,
-      username: user.username,
-      full_name: user.full_name,
-      role: user.role,
-      is_active: user.is_active,
-      created_at: user.created_at,
-    };
-
-    const token = `jwt-digiwms-${user.id}-${Date.now()}`;
+    const { password_hash: _ph, ...safeUser } = user;
+    const token = generateToken(safeUser);
     return {
       status: 'ok',
       success: true,
@@ -241,15 +256,37 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     return { status: 'ok', success: true, message: 'Berhasil keluar dari sesi' };
   });
 
+  // 3C. GET Identitas Pengguna dari JWT (Contoh Penggunaan request.user.id)
+  app.get('/api/auth/me', { preHandler: [authenticate] }, async (request) => {
+    // Backend mengambil identitas pengguna langsung dari token JWT yang sudah diverifikasi:
+    const userId = request.user?.id;
+    const username = request.user?.username;
+    const role = request.user?.role;
+    const fullName = request.user?.full_name;
+
+    return {
+      status: 'ok',
+      success: true,
+      message: 'Identitas pengguna berhasil diekstrak dari JWT token',
+      user: request.user,
+      extracted_info: {
+        user_id: userId,
+        username,
+        role,
+        full_name: fullName,
+      },
+    };
+  });
+
   // 4. GET Daftar Pengguna (Users)
   app.get('/api/users', async () => {
     if (isPostgresConnected) {
       const res = await db.query(
-        'SELECT id, username, full_name, role, is_active, created_at FROM users ORDER BY id ASC'
+        'SELECT id, username, email, full_name, role, is_active, created_at FROM users ORDER BY created_at ASC'
       );
       return { status: 'ok', success: true, data: res.rows };
     }
-    const safeUsers = memoryStore.users.map(({ password: _p, ...rest }) => rest);
+    const safeUsers = memoryStore.users.map(({ password_hash: _p, ...rest }) => rest);
     return { status: 'ok', success: true, data: safeUsers };
   });
 
@@ -267,21 +304,45 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       role?: string;
     };
 
+    if (!username || !full_name) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: 'Username dan Nama Lengkap wajib diisi!',
+      });
+    }
+
+    // Hash kata sandi menggunakan bcrypt (10 rounds salt)
+    const passwordHash = await bcrypt.hash(password || '123456', 10);
+
     if (isPostgresConnected) {
-      const res = await db.query(
-        `INSERT INTO users (username, password_hash, full_name, role, is_active)
-         VALUES ($1, $2, $3, $4, TRUE)
-         RETURNING id, username, full_name, role, is_active, created_at`,
-        [username, password, full_name, role]
+      const check = await db.query(
+        'SELECT id FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
+        [username.trim(), `${username.trim()}@digiwms.id`]
       );
-      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES (1, $1, $2)', [
+      if (check.rows.length > 0) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: `Username @${username} sudah terdaftar di sistem!`,
+        });
+      }
+
+      const res = await db.query(
+        `INSERT INTO users (username, email, password_hash, full_name, role, is_active)
+         VALUES ($1, $2, $3, $4, $5, TRUE)
+         RETURNING id, username, full_name, role, is_active, created_at`,
+        [username.trim(), `${username.trim()}@digiwms.id`, passwordHash, full_name.trim(), role]
+      );
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        res.rows[0].id,
         'CREATE_USER',
-        JSON.stringify({ username, full_name, role }),
+        JSON.stringify({ username: username.trim(), full_name: full_name.trim(), role, note: 'User dibuat dengan bcrypt password hash' }),
       ]);
       return reply.code(201).send({
         status: 'ok',
         success: true,
-        message: `Personel ${full_name} (${role}) berhasil didaftarkan`,
+        message: `Personel ${full_name} (${role}) berhasil didaftarkan (Password telah di-hash)`,
         data: res.rows[0],
       });
     }
@@ -296,9 +357,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
     const newUser = {
       id: memoryStore.users.length > 0 ? Math.max(...memoryStore.users.map((u) => u.id)) + 1 : 1,
-      username,
-      password: password || '123456',
-      full_name,
+      username: username.trim(),
+      password_hash: passwordHash,
+      full_name: full_name.trim(),
       role,
       is_active: true,
       created_at: new Date().toISOString(),
@@ -310,33 +371,83 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       user_name: 'Admin / Supervisor',
       action: 'CREATE_USER',
       payload: {
-        username,
-        full_name,
+        username: username.trim(),
+        full_name: full_name.trim(),
         role,
-        note: `Mendaftarkan personel baru: ${full_name} (@${username}) sebagai ${role}`,
+        note: `Mendaftarkan personel baru: ${full_name} (@${username}) sebagai ${role} (Password di-hash)`,
       },
       created_at: new Date().toISOString(),
     });
 
-    const { password: _pw, ...safeNewUser } = newUser;
+    const { password_hash: _pw, ...safeNewUser } = newUser;
     return reply.code(201).send({
       status: 'ok',
       success: true,
-      message: `Personel ${full_name} (${role}) berhasil didaftarkan`,
+      message: `Personel ${full_name} (${role}) berhasil didaftarkan (Password telah di-hash)`,
       data: safeNewUser,
     });
   });
 
-  // 5B. PUT Edit Data Pengguna & Reset Password
+  // 5B. PUT Edit Data Pengguna & Reset Password (Password Otomatis Di-hash)
   app.put('/api/users/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const userId = Number(id);
     const { full_name, role, password } = request.body as {
       full_name?: string;
       role?: string;
       password?: string;
     };
 
+    let passwordHash: string | undefined;
+    if (password && password.trim().length > 0) {
+      passwordHash = await bcrypt.hash(password.trim(), 10);
+    }
+
+    if (isPostgresConnected) {
+      const updates: string[] = ['updated_at = NOW()'];
+      const values: any[] = [];
+      let idx = 1;
+
+      if (full_name) {
+        updates.push(`full_name = $${idx++}`);
+        values.push(full_name.trim());
+      }
+      if (role) {
+        updates.push(`role = $${idx++}`);
+        values.push(role);
+      }
+      if (passwordHash) {
+        updates.push(`password_hash = $${idx++}`);
+        values.push(passwordHash);
+      }
+
+      values.push(id);
+      const query = `UPDATE users SET ${updates.join(', ')} WHERE id::text = $${idx} RETURNING id, username, full_name, role, is_active, created_at`;
+      const res = await db.query(query, values);
+
+      if (res.rows.length === 0) {
+        return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+      }
+
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        res.rows[0].id,
+        'UPDATE_USER',
+        JSON.stringify({
+          username: res.rows[0].username,
+          role: res.rows[0].role,
+          password_reset: !!passwordHash,
+          note: `Memperbarui profil/hak akses @${res.rows[0].username}${passwordHash ? ' (Password berhasil di-hash)' : ''}`,
+        }),
+      ]);
+
+      return reply.send({
+        status: 'ok',
+        success: true,
+        message: `Data personel ${res.rows[0].full_name} berhasil diperbarui${passwordHash ? ' (Password berhasil di-hash & di-reset)' : ''}`,
+        data: res.rows[0],
+      });
+    }
+
+    const userId = Number(id);
     const target = memoryStore.users.find((u) => u.id === userId);
     if (!target) {
       return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
@@ -344,9 +455,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
     if (full_name) target.full_name = full_name;
     if (role) target.role = role;
-    if (password && password.trim().length > 0) {
-      target.password = password.trim();
-    }
+    if (passwordHash) target.password_hash = passwordHash;
 
     memoryStore.audit_logs.unshift({
       id: memoryStore.audit_logs.length + 1,
@@ -361,7 +470,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       created_at: new Date().toISOString(),
     });
 
-    const { password: _pw, ...safeUser } = target;
+    const { password_hash: _pw, ...safeUser } = target;
     return reply.send({
       status: 'ok',
       success: true,
@@ -373,17 +482,31 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
   // 6. PATCH Aktifkan / Nonaktifkan Status Pengguna
   app.patch('/api/users/:id/toggle', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const userId = Number(id);
 
     if (isPostgresConnected) {
       const res = await db.query(
-        `UPDATE users SET is_active = NOT is_active WHERE id = $1
+        `UPDATE users SET is_active = NOT is_active WHERE id::text = $1
          RETURNING id, username, full_name, role, is_active, created_at`,
-        [userId]
+        [id]
       );
+      if (res.rows.length === 0) {
+        return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+      }
+
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        res.rows[0].id,
+        'TOGGLE_USER_STATUS',
+        JSON.stringify({
+          username: res.rows[0].username,
+          is_active: res.rows[0].is_active,
+          note: `Status akun @${res.rows[0].username} diubah menjadi ${res.rows[0].is_active ? 'AKTIF' : 'NONAKTIF'}`,
+        }),
+      ]);
+
       return reply.send({ status: 'ok', success: true, data: res.rows[0] });
     }
 
+    const userId = Number(id);
     const target = memoryStore.users.find((u) => u.id === userId);
     if (target) {
       target.is_active = !target.is_active;
@@ -409,8 +532,33 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
   // 6B. DELETE Hapus Pengguna
   app.delete('/api/users/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
-    const userId = Number(id);
 
+    if (isPostgresConnected) {
+      const res = await db.query(
+        `DELETE FROM users WHERE id::text = $1 RETURNING id, username, full_name`,
+        [id]
+      );
+      if (res.rows.length === 0) {
+        return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+      }
+
+      await db.query('INSERT INTO audit_logs (action, payload) VALUES ($1, $2)', [
+        'DELETE_USER',
+        JSON.stringify({
+          deleted_username: res.rows[0].username,
+          note: `Menghapus akun personel @${res.rows[0].username} (${res.rows[0].full_name})`,
+        }),
+      ]);
+
+      return reply.send({
+        status: 'ok',
+        success: true,
+        message: `Akun @${res.rows[0].username} berhasil dihapus`,
+        data: res.rows[0],
+      });
+    }
+
+    const userId = Number(id);
     const idx = memoryStore.users.findIndex((u) => u.id === userId);
     if (idx === -1) {
       return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
