@@ -10,28 +10,35 @@ const CLIENT_ID = `${process.env.MQTT_CLIENT_ID_PREFIX || 'digiwms_api_'}${Math.
   .substring(2, 8)}`;
 
 export let mqttClient: MqttClient | null = null;
+let hasLoggedOfflineNotice = false;
 
 export function initMqttClient(): MqttClient {
   mqttClient = mqtt.connect(BROKER_URL, {
     clientId: CLIENT_ID,
     clean: true,
     connectTimeout: 4000,
-    reconnectPeriod: 3000,
+    reconnectPeriod: 5000,
   });
 
   mqttClient.on('connect', () => {
+    hasLoggedOfflineNotice = false;
     console.log(`[EMQX MQTT] Terhubung ke broker ${BROKER_URL} sebagai ${CLIENT_ID}`);
 
     // Subscribe topik dari Handheld Opname & Gate Reader
-    mqttClient?.subscribe(['wms/opname/+/scan', 'wms/gate/+/read'], (err) => {
+    mqttClient?.subscribe(['digiwms/#', 'wms/opname/+/scan', 'wms/gate/+/read'], (err) => {
       if (!err) {
-        console.log('[EMQX MQTT] Aktif mendengarkan topik: wms/opname/+/scan & wms/gate/+/read');
+        console.log('[EMQX MQTT] Aktif mendengarkan topik: digiwms/#, wms/opname/+/scan & wms/gate/+/read');
       }
     });
   });
 
-  mqttClient.on('error', (err) => {
-    console.warn('[EMQX MQTT] Peringatan koneksi broker:', err.message);
+  mqttClient.on('error', () => {
+    if (!hasLoggedOfflineNotice) {
+      hasLoggedOfflineNotice = true;
+      console.log(
+        `[EMQX MQTT] Broker Docker (${BROKER_URL}) belum aktif -> Mode Simulasi HTTP/Memory siap digunakan`
+      );
+    }
   });
 
   return mqttClient;
