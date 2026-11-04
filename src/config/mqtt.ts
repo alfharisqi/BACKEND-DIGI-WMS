@@ -16,15 +16,14 @@ export function initMqttClient(): MqttClient {
   mqttClient = mqtt.connect(BROKER_URL, {
     clientId: CLIENT_ID,
     clean: true,
-    connectTimeout: 4000,
-    reconnectPeriod: 5000,
+    connectTimeout: 3000,
+    reconnectPeriod: 0, // Jangan spam reconnect jika Docker EMQX belum dinyalakan
   });
 
   mqttClient.on('connect', () => {
     hasLoggedOfflineNotice = false;
     console.log(`[EMQX MQTT] Terhubung ke broker ${BROKER_URL} sebagai ${CLIENT_ID}`);
 
-    // Subscribe topik dari Handheld Opname & Gate Reader
     mqttClient?.subscribe(['digiwms/#', 'wms/opname/+/scan', 'wms/gate/+/read'], (err) => {
       if (!err) {
         console.log('[EMQX MQTT] Aktif mendengarkan topik: digiwms/#, wms/opname/+/scan & wms/gate/+/read');
@@ -39,6 +38,7 @@ export function initMqttClient(): MqttClient {
         `[EMQX MQTT] Broker Docker (${BROKER_URL}) belum aktif -> Mode Simulasi HTTP/Memory siap digunakan`
       );
     }
+    mqttClient?.end(true);
   });
 
   return mqttClient;
