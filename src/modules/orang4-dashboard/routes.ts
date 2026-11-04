@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
 import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
 import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
+import { generateToken, authenticate, requireRoles } from '../../middleware/auth';
 
 /**
  * ============================================================================
@@ -173,7 +174,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       ]);
 
       const { password_hash: _ph, ...safeUser } = user;
-      const token = `jwt-digiwms-${user.id}-${Date.now()}`;
+      const token = generateToken(safeUser);
       return {
         status: 'ok',
         success: true,
@@ -225,7 +226,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     });
 
     const { password_hash: _ph, ...safeUser } = user;
-    const token = `jwt-digiwms-${user.id}-${Date.now()}`;
+    const token = generateToken(safeUser);
     return {
       status: 'ok',
       success: true,
@@ -253,6 +254,28 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       created_at: new Date().toISOString(),
     });
     return { status: 'ok', success: true, message: 'Berhasil keluar dari sesi' };
+  });
+
+  // 3C. GET Identitas Pengguna dari JWT (Contoh Penggunaan request.user.id)
+  app.get('/api/auth/me', { preHandler: [authenticate] }, async (request) => {
+    // Backend mengambil identitas pengguna langsung dari token JWT yang sudah diverifikasi:
+    const userId = request.user?.id;
+    const username = request.user?.username;
+    const role = request.user?.role;
+    const fullName = request.user?.full_name;
+
+    return {
+      status: 'ok',
+      success: true,
+      message: 'Identitas pengguna berhasil diekstrak dari JWT token',
+      user: request.user,
+      extracted_info: {
+        user_id: userId,
+        username,
+        role,
+        full_name: fullName,
+      },
+    };
   });
 
   // 4. GET Daftar Pengguna (Users)
