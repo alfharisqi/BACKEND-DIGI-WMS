@@ -7,7 +7,7 @@ import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
  * MODUL LENGKAP ORANG 4:
  * - PONDASI SERVER & HEALTH MONITOR (PostgreSQL + EMQX MQTT)
  * - DASHBOARD KPI EKSEKUTIF, GRAFIK PERGERAKAN STOK & PERINGATAN STOK KRITIS
- * - AUTENTIKASI LOGIN ROLE, MANAJEMEN PENGGUNA (RBAC) & AUDIT LOGS
+ * - AUTENTIKASI LOGIN RESMI (USERNAME & PASSWORD), MANAJEMEN USER (CRUD RBAC) & AUDIT LOGS
  * - PENGATURAN SISTEM GUDANG & PARAMETER FREKUENSI UHF RFID (920-923 MHz)
  * ============================================================================
  */
@@ -124,9 +124,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     };
   });
 
-  // 3. POST Login / Switch Role Pengguna Aktif + Catat ke Audit Log
+  // 3. POST Login Resmi (Validasi Username & Password + Catat ke Audit Log)
   app.post('/api/auth/login', async (request, reply) => {
-    const { username } = request.body as { username: string; password?: string };
+    const { username, password } = request.body as { username: string; password?: string };
 
     if (isPostgresConnected) {
       const res = await db.query(
@@ -134,49 +134,64 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         [username]
       );
       if (res.rows.length === 0) {
-        return reply.code(404).send({ success: false, message: 'Pengguna tidak ditemukan' });
+        return reply
+          .code(401)
+          .send({ success: false, message: 'Username atau password salah!' });
       }
       const user = res.rows[0];
       if (!user.is_active) {
         return reply
           .code(403)
-          .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan!' });
+          .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan oleh Admin!' });
       }
       await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
         user.id,
-        'USER_LOGIN_SWITCH',
-        JSON.stringify({ username: user.username, role: user.role }),
+        'USER_LOGIN',
+        JSON.stringify({
+          username: user.username,
+          role: user.role,
+          note: `Login berhasil ke sistem DIGI WMS (${user.role})`,
+        }),
       ]);
       const token = `jwt-digiwms-${user.id}-${Date.now()}`;
       return {
         status: 'ok',
         success: true,
-        message: `Berhasil beralih ke sesi ${user.full_name} (Role: ${user.role})`,
+        message: `Selamat datang, ${user.full_name} (${user.role})`,
         token,
         user,
         data: { user, token },
       };
     }
 
-    const user = memoryStore.users.find((u) => u.username === username);
+    const user = memoryStore.users.find(
+      (u) => u.username.toLowerCase() === String(username || '').toLowerCase()
+    );
     if (!user) {
-      return reply.code(404).send({ success: false, message: 'Pengguna tidak ditemukan' });
+      return reply
+        .code(401)
+        .send({ success: false, message: 'Username tidak ditemukan!' });
+    }
+    if (password !== undefined && user.password && password !== user.password) {
+      return reply
+        .code(401)
+        .send({ success: false, message: 'Password yang Anda masukkan salah!' });
     }
     if (!user.is_active) {
       return reply
         .code(403)
-        .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan!' });
+        .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan oleh Admin!' });
     }
 
     memoryStore.audit_logs.unshift({
       id: memoryStore.audit_logs.length + 1,
       user_id: user.id,
       user_name: user.full_name,
-      action: 'USER_LOGIN_SWITCH',
+      action: 'USER_LOGIN',
       payload: {
         username: user.username,
         role: user.role,
-        note: `Sesi aktif beralih ke ${user.full_name} (${user.role})`,
+        note: `Login berhasil ke portal DIGI WMS (${user.role})`,
       },
       created_at: new Date().toISOString(),
     });
@@ -187,15 +202,43 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       role: user.role,
     });
 
+    const safeUser = {
+      id: user.id,
+      username: user.username,
+      full_name: user.full_name,
+      role: user.role,
+      is_active: user.is_active,
+      created_at: user.created_at,
+    };
+
     const token = `jwt-digiwms-${user.id}-${Date.now()}`;
     return {
       status: 'ok',
       success: true,
-      message: `Berhasil beralih ke sesi ${user.full_name} (Role: ${user.role})`,
+      message: `Selamat datang, ${user.full_name} (${user.role})`,
       token,
-      user,
-      data: { user, token },
+      user: safeUser,
+      data: { user: safeUser, token },
     };
+  });
+
+  // 3B. POST Logout Pengguna
+  app.post('/api/auth/logout', async (request) => {
+    const { username, full_name, role } =
+      (request.body as { username?: string; full_name?: string; role?: string }) || {};
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: full_name || username || 'User',
+      action: 'USER_LOGOUT',
+      payload: {
+        username: username || 'unknown',
+        role: role || 'STAFF',
+        note: `Logout keluar dari sesi DIGI WMS`,
+      },
+      created_at: new Date().toISOString(),
+    });
+    return { status: 'ok', success: true, message: 'Berhasil keluar dari sesi' };
   });
 
   // 4. GET Daftar Pengguna (Users)
@@ -206,13 +249,20 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       );
       return { status: 'ok', success: true, data: res.rows };
     }
-    return { status: 'ok', success: true, data: memoryStore.users };
+    const safeUsers = memoryStore.users.map(({ password: _p, ...rest }) => rest);
+    return { status: 'ok', success: true, data: safeUsers };
   });
 
   // 5. POST Tambah Pengguna Baru (Manajemen Staf Gudang oleh Orang 4)
   app.post('/api/users', async (request, reply) => {
-    const { username, full_name, role = 'OPERATOR' } = request.body as {
+    const {
+      username,
+      password = '123456',
+      full_name,
+      role = 'WAREHOUSE_STAFF',
+    } = request.body as {
       username: string;
+      password?: string;
       full_name: string;
       role?: string;
     };
@@ -220,9 +270,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     if (isPostgresConnected) {
       const res = await db.query(
         `INSERT INTO users (username, password_hash, full_name, role, is_active)
-         VALUES ($1, '$2b$10$defaultpasswordhash', $2, $3, TRUE)
+         VALUES ($1, $2, $3, $4, TRUE)
          RETURNING id, username, full_name, role, is_active, created_at`,
-        [username, full_name, role]
+        [username, password, full_name, role]
       );
       await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES (1, $1, $2)', [
         'CREATE_USER',
@@ -245,8 +295,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     }
 
     const newUser = {
-      id: memoryStore.users.length + 1,
+      id: memoryStore.users.length > 0 ? Math.max(...memoryStore.users.map((u) => u.id)) + 1 : 1,
       username,
+      password: password || '123456',
       full_name,
       role,
       is_active: true,
@@ -262,16 +313,60 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         username,
         full_name,
         role,
-        note: `Menambahkan akun personel baru @${username} (${role})`,
+        note: `Mendaftarkan personel baru: ${full_name} (@${username}) sebagai ${role}`,
       },
       created_at: new Date().toISOString(),
     });
 
+    const { password: _pw, ...safeNewUser } = newUser;
     return reply.code(201).send({
       status: 'ok',
       success: true,
       message: `Personel ${full_name} (${role}) berhasil didaftarkan`,
-      data: newUser,
+      data: safeNewUser,
+    });
+  });
+
+  // 5B. PUT Edit Data Pengguna & Reset Password
+  app.put('/api/users/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = Number(id);
+    const { full_name, role, password } = request.body as {
+      full_name?: string;
+      role?: string;
+      password?: string;
+    };
+
+    const target = memoryStore.users.find((u) => u.id === userId);
+    if (!target) {
+      return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+    }
+
+    if (full_name) target.full_name = full_name;
+    if (role) target.role = role;
+    if (password && password.trim().length > 0) {
+      target.password = password.trim();
+    }
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: 'Admin / Supervisor',
+      action: 'UPDATE_USER',
+      payload: {
+        username: target.username,
+        role: target.role,
+        note: `Memperbarui profil/hak akses @${target.username} (${target.full_name} - ${target.role})`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const { password: _pw, ...safeUser } = target;
+    return reply.send({
+      status: 'ok',
+      success: true,
+      message: `Data personel ${target.full_name} berhasil diperbarui`,
+      data: safeUser,
     });
   });
 
@@ -311,6 +406,39 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     return reply.send({ status: 'ok', success: true, data: target });
   });
 
+  // 6B. DELETE Hapus Pengguna
+  app.delete('/api/users/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const userId = Number(id);
+
+    const idx = memoryStore.users.findIndex((u) => u.id === userId);
+    if (idx === -1) {
+      return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+    }
+
+    const removed = memoryStore.users[idx];
+    memoryStore.users.splice(idx, 1);
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: 'Admin / Supervisor',
+      action: 'DELETE_USER',
+      payload: {
+        username: removed.username,
+        role: removed.role,
+        note: `Menghapus akun personel @${removed.username} (${removed.full_name})`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    return reply.send({
+      status: 'ok',
+      success: true,
+      message: `Akun @${removed.username} berhasil dihapus`,
+    });
+  });
+
   // 7. GET Riwayat Audit Log Keamanan Sistem
   app.get('/api/audit-logs', async (request) => {
     const { role } = (request.query as { role?: string }) || {};
@@ -336,9 +464,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           : {};
       const actorRole = String(payloadObj.role || log.user_role || 'ADMIN');
       const actorUsername = String(log.user_name || payloadObj.username || 'admin_wms');
-      const details = String(
-        payloadObj.note || JSON.stringify(payloadObj)
-      );
+      const details = String(payloadObj.note || JSON.stringify(payloadObj));
       return {
         id: log.id,
         actor_username: actorUsername,

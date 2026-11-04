@@ -22,10 +22,10 @@ export let isPostgresConnected = false;
  */
 export const memoryStore = {
   users: [
-    { id: 1, username: 'sarah.jenkins', full_name: 'Sarah Jenkins', role: 'SUPERVISOR', is_active: true, created_at: '2026-05-01T08:00:00.000Z' },
-    { id: 2, username: 'admin.wms', full_name: 'Budi Santoso (Admin)', role: 'ADMIN', is_active: true, created_at: '2026-05-01T08:05:00.000Z' },
-    { id: 3, username: 'operator.inbound', full_name: 'Andi Pratama (Inbound)', role: 'WAREHOUSE_STAFF', is_active: true, created_at: '2026-05-02T09:00:00.000Z' },
-    { id: 4, username: 'security.gate', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: '2026-05-02T09:30:00.000Z' },
+    { id: 1, username: 'sarah.jenkins', password: '123456', full_name: 'Sarah Jenkins', role: 'SUPERVISOR', is_active: true, created_at: '2026-05-01T08:00:00.000Z' },
+    { id: 2, username: 'admin.wms', password: '123456', full_name: 'Budi Santoso (Admin)', role: 'ADMIN', is_active: true, created_at: '2026-05-01T08:05:00.000Z' },
+    { id: 3, username: 'operator.inbound', password: '123456', full_name: 'Andi Pratama (Inbound)', role: 'WAREHOUSE_STAFF', is_active: true, created_at: '2026-05-02T09:00:00.000Z' },
+    { id: 4, username: 'security.gate', password: '123456', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: '2026-05-02T09:30:00.000Z' },
   ],
   audit_logs: [
     { id: 1, user_id: 2, user_name: 'Budi Santoso (Admin)', action: 'INIT_SYSTEM', payload: { role: 'ADMIN', note: 'Inisialisasi Server DIGI WMS & Broker EMQX' } as Record<string, unknown>, created_at: '2026-05-12T08:00:00.000Z' },
