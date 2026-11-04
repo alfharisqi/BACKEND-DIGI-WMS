@@ -3,13 +3,17 @@
 -- Views, User Authentication columns & Audit Logs adjustments
 -- ============================================================================
 
--- 1. Ensure username, password, password_hash in users table
+-- 1. Ensure username and password_hash in users table (Bcrypt Hash)
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS username text;
-ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password text DEFAULT '123456';
 ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password_hash text;
+ALTER TABLE public.users ALTER COLUMN password DROP NOT NULL;
 
-UPDATE public.users SET username = split_part(email, '@', 1) WHERE username IS NULL;
-UPDATE public.users SET password = '123456' WHERE password IS NULL;
+-- Default password hash for existing users: $2b$10$d1.oqA8VE4yah4LNHPT93Ocho6tmG2fdpUNrp/yVwWziVuoiEL6Ne ('123456')
+UPDATE public.users 
+SET 
+    username = COALESCE(username, split_part(email, '@', 1)),
+    password_hash = COALESCE(password_hash, '$2b$10$d1.oqA8VE4yah4LNHPT93Ocho6tmG2fdpUNrp/yVwWziVuoiEL6Ne'),
+    password = NULL;
 
 -- 2. Audit logs payload column & default entity_type
 ALTER TABLE public.audit_logs ADD COLUMN IF NOT EXISTS payload jsonb;
