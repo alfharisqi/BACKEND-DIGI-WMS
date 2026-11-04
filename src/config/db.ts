@@ -28,10 +28,11 @@ export const memoryStore = {
     { id: 4, username: 'security.gate', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: '2026-05-02T09:30:00.000Z' },
   ],
   audit_logs: [
-    { id: 1, user_id: 2, user_name: 'Budi Santoso (Admin)', action: 'INIT_SYSTEM', payload: { info: 'Inisialisasi Server DIGI WMS & Broker EMQX' }, created_at: '2026-05-12T08:00:00.000Z' },
-    { id: 2, user_id: 1, user_name: 'Sarah Jenkins', action: 'VERIFY_GRN', payload: { po_number: 'PO-2026-8901', qty: 150 }, created_at: '2026-05-12T09:30:00.000Z' },
-    { id: 3, user_id: 1, user_name: 'Sarah Jenkins', action: 'UPDATE_RFID_SETTINGS', payload: { rssi_threshold: '-65 dBm', freq: '920-923 MHz' }, created_at: '2026-05-12T10:15:00.000Z' },
+    { id: 1, user_id: 2, user_name: 'Budi Santoso (Admin)', action: 'INIT_SYSTEM', payload: { role: 'ADMIN', note: 'Inisialisasi Server DIGI WMS & Broker EMQX' } as Record<string, unknown>, created_at: '2026-05-12T08:00:00.000Z' },
+    { id: 2, user_id: 1, user_name: 'Sarah Jenkins', action: 'VERIFY_GRN', payload: { role: 'SUPERVISOR', po_number: 'PO-2026-8901', qty: 150, note: 'Verifikasi surat jalan PO-2026-8901 (150 unit)' } as Record<string, unknown>, created_at: '2026-05-12T09:30:00.000Z' },
+    { id: 3, user_id: 1, user_name: 'Sarah Jenkins', action: 'UPDATE_RFID_SETTINGS', payload: { role: 'SUPERVISOR', rssi_threshold: '-65 dBm', freq: '920-923 MHz', note: 'Kalibrasi ambang batas RSSI gerbang ke -65 dBm' } as Record<string, unknown>, created_at: '2026-05-12T10:15:00.000Z' },
   ],
+  gate_events: [] as Array<Record<string, unknown>>,
   settings: {
     warehouse_name: 'Gudang Utama DIGI WMS — Jakarta Pusat',
     rfid_frequency: '920 - 923 MHz (Standar Kominfo Indonesia)',
