@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  # ==========================================================
+  # 1. DATABASE POSTGRESQL (Port 5432)
+  # Otomatis mengeksekusi ./sql/init_schema.sql saat pertama jalan
+  # ==========================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: digiwms_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-digiwms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-digiwms_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-digiwms_db}
+      TZ: Asia/Jakarta
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+      - ./sql/init_schema.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U digiwms -d digiwms_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================
+  # 2. EMQX MQTT BROKER (Port 1883 TCP, 8083 WS, 18083 Dashboard)
+  # Pusat Live Updating & Integrasi Reader RFID
+  # ==========================================================
+  emqx:
+    image: emqx/emqx:5.7.2
+    container_name: digiwms_emqx
+    restart: unless-stopped
+    environment:
+      - "EMQX_NODE_NAME=emqx@node1.digiwms.local"
+      - "TZ=Asia/Jakarta"
+    ports:
+      - "1883:1883"     # MQTT over TCP (Backend API, Gate Service, RFID Reader)
+      - "8083:8083"     # MQTT over WebSocket (Langsung ke React.js Browser)
+      - "8084:8084"     # MQTT over WSS (SSL WebSocket)
+      - "8883:8883"     # MQTT over SSL/TLS
+      - "18083:18083"   # EMQX Web Dashboard UI (Login: admin / public)
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
