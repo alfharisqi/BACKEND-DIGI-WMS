@@ -306,8 +306,8 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       }
 
       const res = await db.query(
-        `INSERT INTO users (username, email, password_hash, password, full_name, role, is_active)
-         VALUES ($1, $2, $3, NULL, $4, $5, TRUE)
+        `INSERT INTO users (username, email, password_hash, full_name, role, is_active)
+         VALUES ($1, $2, $3, $4, $5, TRUE)
          RETURNING id, username, full_name, role, is_active, created_at`,
         [username.trim(), `${username.trim()}@digiwms.id`, passwordHash, full_name.trim(), role]
       );
@@ -393,7 +393,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         values.push(role);
       }
       if (passwordHash) {
-        updates.push(`password_hash = $${idx++}, password = NULL`);
+        updates.push(`password_hash = $${idx++}`);
         values.push(passwordHash);
       }
 
