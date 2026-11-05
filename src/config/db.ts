@@ -1,17 +1,24 @@
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
-import path from 'path';
+import path from 'path'; 
+import dns from 'node:dns';
 
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+dns.setDefaultResultOrder('ipv4first');
 export const db = new Pool({
   connectionString:
     process.env.DATABASE_URL ||
     'postgresql://digiwms:digiwms_pass@localhost:5432/digiwms_db',
+
+  ssl: process.env.DATABASE_URL
+    ? { rejectUnauthorized: false }
+    : undefined,
+
   max: 15,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 10000,
 });
 
 export let isPostgresConnected = false;
@@ -105,11 +112,15 @@ export async function checkDatabaseConnection(): Promise<boolean> {
     isPostgresConnected = true;
     console.log(`[PostgreSQL] Terhubung ke database pada: ${res.rows[0].server_time}`);
     return true;
-  } catch {
-    isPostgresConnected = false;
-    console.log(
-      '[Database] Docker PostgreSQL belum aktif -> Menggunakan In-Memory Ledger Store (Siap Pakai)'
-    );
-    return false;
-  }
+  } catch (error) {
+  isPostgresConnected = false;
+
+  console.error('[PostgreSQL] Gagal terhubung:', error);
+
+  console.log(
+    '[Database] Menggunakan In-Memory Ledger Store sebagai fallback.'
+  );
+
+  return false;
+}
 }

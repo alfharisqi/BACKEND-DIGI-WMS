@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { db, isPostgresConnected, memoryStore } from '../../config/db';
 import { publishRealtimeEvent } from '../../config/mqtt';
+import { authenticate, requireRoles } from '../../middleware/auth';
 
 /**
  * ============================================================================
@@ -8,6 +9,156 @@ import { publishRealtimeEvent } from '../../config/mqtt';
  * ============================================================================
  */
 export async function orang3OpnameRoutes(app: FastifyInstance) {
+
+  // 1. POST Membuka Sesi Stock Opname Baru
+  app.post(
+    '/api/stocktake/sessions',
+    {
+      preHandler: [
+        authenticate,
+        requireRoles('WAREHOUSE_STAFF', 'SUPERVISOR'),
+      ],
+    },
+    async (request, reply) => {
+      try {
+        // 1. Mengambil data dari frontend
+        const { zone_code, scanner_device } = request.body as {
+          zone_code: string;
+          scanner_device?: string;
+        };
+
+        // 2. Mengambil identitas pengguna yang login
+        const user = request.user;
+
+        if (!user) {
+          return reply.code(401).send({
+            success: false,
+            message: 'Pengguna belum login.',
+          });
+        }
+
+        // 3. Memastikan ID pengguna berbentuk UUID
+        const uuidRegex =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+        if (
+          typeof user.id !== 'string' ||
+          !uuidRegex.test(user.id)
+        ) {
+          return reply.code(400).send({
+            success: false,
+            message: 'ID pengguna bukan UUID yang valid.',
+          });
+        }
+
+        // 4. Memvalidasi zona
+        if (!zone_code || !zone_code.trim()) {
+          return reply.code(400).send({
+            success: false,
+            message: 'Kode zona wajib diisi.',
+          });
+        }
+
+        if (!isPostgresConnected) {
+          return reply.code(503).send({
+            success: false,
+            message: 'Database Supabase belum terhubung.',
+          });
+        }
+
+        // 5. Memeriksa apakah zona tersedia
+        const zoneResult = await db.query(
+          `SELECT id, zone_code
+           FROM locations
+           WHERE zone_code = $1
+           LIMIT 1`,
+          [zone_code.trim()]
+        );
+
+        if (zoneResult.rows.length === 0) {
+          return reply.code(404).send({
+            success: false,
+            message: `Zona ${zone_code} tidak ditemukan.`,
+          });
+        }
+
+        // 6. Menghitung barang yang tersedia di zona tersebut
+        const itemResult = await db.query(
+          `SELECT COUNT(*)::int AS total_expected
+           FROM items i
+           JOIN locations l ON i.location_id = l.id
+           JOIN tags t ON i.tag_id = t.id
+           WHERE l.zone_code = $1
+             AND i.status = 'IN_STOCK'
+             AND t.status = 'IN_STOCK'`,
+          [zone_code.trim()]
+        );
+
+        const totalExpected = itemResult.rows[0].total_expected;
+
+        if (totalExpected === 0) {
+          return reply.code(400).send({
+            success: false,
+            message: `Tidak ada barang tersedia di zona ${zone_code}.`,
+          });
+        }
+
+        // 7. Membuat kode sesi
+        const sessionCode =
+          `OPN-${zone_code.trim()}-${Date.now()}`;
+
+        // 8. Menyimpan sesi ke Supabase
+        const sessionResult = await db.query(
+          `INSERT INTO stocktake_sessions (
+            session_code,
+            zone_code,
+            scanner_device,
+            total_expected,
+            total_scanned,
+            matched_count,
+            missing_count,
+            misplaced_count,
+            status,
+            conducted_by
+          )
+          VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 'IN_PROGRESS', $5)
+          RETURNING *`,
+          [
+            sessionCode,
+            zone_code.trim(),
+            scanner_device || 'HANDHELD-SIM-01',
+            totalExpected,
+            user.id,
+          ]
+        );
+
+        const newSession = sessionResult.rows[0];
+
+        // 9. Mengirim informasi sesi melalui MQTT
+        publishRealtimeEvent(
+          `wms/opname/${newSession.id}/scan`,
+          {
+            event: 'STOCKTAKE_STARTED',
+            session: newSession,
+          }
+        );
+
+        // 10. Mengirim hasil kepada frontend
+        return reply.code(201).send({
+          success: true,
+          message: 'Sesi Stock Opname berhasil dibuat.',
+          data: newSession,
+        });
+      } catch (error) {
+        console.error('[STOCKTAKE] Gagal membuka sesi:', error);
+
+        return reply.code(500).send({
+          success: false,
+          message: 'Gagal membuat sesi Stock Opname.',
+        });
+      }
+    }
+  );
   // 1. GET Daftar Sesi Stock Opname
   app.get('/api/stocktake/sessions', async () => {
     if (isPostgresConnected) {

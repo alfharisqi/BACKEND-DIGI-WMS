@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
+    "@supabase/server": "^1.9.2",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
     "mqtt": "^5.7.0",
