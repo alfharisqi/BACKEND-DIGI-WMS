@@ -168,120 +168,359 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
     return { success: true, data: memoryStore.stocktake_sessions };
   });
 
-  // 2. POST Mulai Sesi Stock Opname Baru & Kirim Daftar EPC Hasil Scan Handheld
+  
+  // 2. POST Mengirim Hasil Scan RFID ke Sesi Stock Opname
   app.post('/api/stocktake/scan-submit', async (request, reply) => {
-    const {
-      zone_code = 'A1',
-      total_expected = 125,
-      total_scanned = 124,
-      total_matched = 124,
-      total_missing = 0,
-      total_misplaced = 1,
-    } = request.body as {
-      zone_code?: string;
-      total_expected?: number;
-      total_scanned?: number;
-      total_matched?: number;
-      total_missing?: number;
-      total_misplaced?: number;
-    };
+    try {
+      const { session_id, scanned_epcs } = request.body as {
+        session_id: string;
+        scanned_epcs: string[];
+      };
 
-    const sessionCode = `OPN-${zone_code}-${Date.now().toString().slice(-4)}`;
+      // Validasi input
+      if (!session_id || !Array.isArray(scanned_epcs)) {
+        return reply.code(400).send({
+          success: false,
+          message: 'ID sesi dan daftar EPC wajib diisi.',
+        });
+      }
 
-    if (isPostgresConnected) {
-      const res = await db.query(
-        `INSERT INTO stocktake_sessions 
-          (session_code, zone_code, total_expected, total_scanned, total_matched, total_missing, total_misplaced, status, scanned_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'MENUNGGU_APPROVAL', 1)
-         RETURNING *`,
-        [sessionCode, zone_code, total_expected, total_scanned, total_matched, total_missing, total_misplaced]
+      if (!isPostgresConnected) {
+        return reply.code(503).send({
+          success: false,
+          message: 'Database Supabase belum terhubung.',
+        });
+      }
+
+      // 1. Ambil sesi opname yang sudah dibuat
+      const sessionResult = await db.query(
+        `SELECT id, zone_code, status
+         FROM stocktake_sessions
+         WHERE id = $1`,
+        [session_id]
       );
-      publishRealtimeEvent(`wms/opname/${sessionCode}/scan`, { session: res.rows[0] });
-      return reply.code(201).send({ success: true, data: res.rows[0] });
+
+      if (sessionResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          message: 'Sesi stock opname tidak ditemukan.',
+        });
+      }
+
+      const session = sessionResult.rows[0];
+
+      if (session.status !== 'IN_PROGRESS') {
+        return reply.code(400).send({
+          success: false,
+          message: 'Sesi ini tidak sedang berlangsung.',
+        });
+      }
+
+      // 2. Hilangkan EPC duplikat
+      const uniqueEpcs = [
+        ...new Set(
+          scanned_epcs
+            .filter((epc) => typeof epc === 'string')
+            .map((epc) => epc.trim())
+            .filter((epc) => epc.length > 0)
+        ),
+      ];
+
+      // 3. Ambil daftar barang yang seharusnya ada di zona sesi
+      const expectedResult = await db.query(
+        `SELECT t.epc
+         FROM items i
+         JOIN locations l ON i.location_id = l.id
+         JOIN tags t ON i.tag_id = t.id
+         WHERE l.zone_code = $1
+           AND i.status = 'IN_STOCK'
+           AND t.status = 'IN_STOCK'`,
+        [session.zone_code]
+      );
+
+      const expectedEpcs = new Set(
+        expectedResult.rows.map((item) => item.epc)
+      );
+
+      // 4. Cari EPC hasil scan di database
+      const actualResult = uniqueEpcs.length > 0
+        ? await db.query(
+            `SELECT t.epc, l.zone_code
+             FROM tags t
+             LEFT JOIN items i ON i.tag_id = t.id
+             LEFT JOIN locations l ON i.location_id = l.id
+             WHERE t.epc = ANY($1::text[])`,
+            [uniqueEpcs]
+          )
+        : { rows: [] };
+
+      const actualMap = new Map(
+        actualResult.rows.map((item) => [item.epc, item.zone_code])
+      );
+
+      // 5. Hitung hasil scan
+let matchedCount = 0;
+let misplacedCount = 0;
+
+const discrepancies: Array<Record<string, unknown>> = [];
+
+const scannedEpcs = new Set(uniqueEpcs);
+
+// Periksa semua EPC yang terbaca scanner
+for (const epc of uniqueEpcs) {
+  if (expectedEpcs.has(epc)) {
+    matchedCount++;
+  } else if (actualMap.has(epc)) {
+    misplacedCount++;
+
+    discrepancies.push({
+      epc,
+      type: 'MISPLACED',
+      actual_zone: actualMap.get(epc),
+      expected_zone: session.zone_code,
+    });
+  } else {
+    discrepancies.push({
+      epc,
+      type: 'UNKNOWN_TAG',
+      expected_zone: session.zone_code,
+    });
+  }
+}
+
+// Periksa barang yang seharusnya ada tetapi tidak terbaca
+for (const epc of expectedEpcs) {
+  if (!scannedEpcs.has(epc)) {
+    discrepancies.push({
+      epc,
+      type: 'MISSING',
+      expected_zone: session.zone_code,
+    });
+  }
+}
+
+const missingCount = discrepancies.filter(
+  (item) => item.type === 'MISSING'
+).length;
+
+      // 6. Simpan hasil rekonsiliasi ke sesi yang sama
+      const updateResult = await db.query(
+        `UPDATE stocktake_sessions
+         SET total_scanned = $1,
+             matched_count = $2,
+             missing_count = $3,
+             misplaced_count = $4,
+             discrepancies = $5
+         WHERE id = $6
+         RETURNING *`,
+        [
+          uniqueEpcs.length,
+          matchedCount,
+          missingCount,
+          misplacedCount,
+          JSON.stringify(discrepancies),
+          session_id,
+        ]
+      );
+
+      // 7. Kirim informasi hasil melalui MQTT
+      publishRealtimeEvent(
+        `wms/opname/${session_id}/scan`,
+        {
+          event: 'STOCKTAKE_SCAN_SUBMITTED',
+          session: updateResult.rows[0],
+        }
+      );
+
+      return reply.send({
+        success: true,
+        message: 'Hasil scan RFID berhasil direkonsiliasi.',
+        data: updateResult.rows[0],
+      });
+    } catch (error) {
+      console.error('[STOCKTAKE] Gagal mengirim hasil scan:', error);
+
+      return reply.code(500).send({
+        success: false,
+        message: 'Gagal memproses hasil scan RFID.',
+      });
     }
-
-    const newSession = {
-      id: memoryStore.stocktake_sessions.length + 1,
-      session_code: sessionCode,
-      zone_code,
-      total_expected,
-      total_scanned,
-      total_matched,
-      total_missing,
-      total_misplaced,
-      status: 'MENUNGGU_APPROVAL',
-      created_at: new Date().toISOString(),
-    };
-    memoryStore.stocktake_sessions.unshift(newSession);
-    publishRealtimeEvent(`wms/opname/${sessionCode}/scan`, { session: newSession });
-
-    return reply.code(201).send({ success: true, data: newSession });
   });
 
-  // 3. POST Persetujuan Supervisor (Approve Adjustment ke Buku Besar Ledger Orang 2)
-  app.post('/api/stocktake/approve', async (request, reply) => {
-    const { session_code, product_id, diff_qty, from_rack, to_rack } = request.body as {
-      session_code: string;
-      product_id: number;
-      diff_qty: number;
-      from_rack?: string;
-      to_rack?: string;
-    };
 
-    if (isPostgresConnected) {
+  
+  // 3. POST Persetujuan Supervisor
+  app.post(
+    '/api/stocktake/approve',
+    {
+      preHandler: [
+        authenticate,
+        requireRoles('SUPERVISOR'),
+      ],
+    },
+    async (request, reply) => {
+      const {
+        session_code,
+        product_id,
+        diff_qty,
+        from_rack,
+        to_rack,
+      } = request.body as {
+        session_code: string;
+        product_id: string;
+        diff_qty: number;
+        from_rack?: string;
+        to_rack?: string;
+      };
+
+      const user = request.user;
+
+      // 1. Validasi input
+      if (
+        !session_code ||
+        !product_id ||
+        !Number.isInteger(diff_qty) ||
+        diff_qty === 0
+      ) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Data persetujuan atau jumlah selisih tidak valid.',
+        });
+      }
+
+      if (!user || typeof user.id !== 'string') {
+        return reply.code(401).send({
+          success: false,
+          message: 'Identitas supervisor tidak valid.',
+        });
+      }
+
+      if (!isPostgresConnected) {
+        return reply.code(503).send({
+          success: false,
+          message: 'Database Supabase belum terhubung.',
+        });
+      }
+
       const client = await db.connect();
+
       try {
         await client.query('BEGIN');
-        await client.query(
-          `UPDATE stocktake_sessions SET status = 'DISETUJUI', approved_by = 1 WHERE session_code = $1`,
+
+        // 2. Periksa sesi opname
+        const sessionResult = await client.query(
+          `SELECT id, status
+           FROM stocktake_sessions
+           WHERE session_code = $1
+           FOR UPDATE`,
           [session_code]
         );
-        const txCode = `TX-OPN-${Date.now().toString().slice(-4)}`;
-        const ledgerRes = await client.query(
-          `INSERT INTO stock_movements 
-            (tx_code, movement_type, product_id, from_location, to_location, qty, reference_doc, operator_id)
-           VALUES ($1, 'STOCKTAKE_ADJUSTMENT', $2, $3, $4, $5, $6, 1)
-           RETURNING *`,
-          [txCode, product_id, from_rack || 'Audit Opname Fisik', to_rack || 'Koreksi Buku Besar', diff_qty, session_code]
+
+        if (sessionResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+
+          return reply.code(404).send({
+            success: false,
+            message: 'Sesi stock opname tidak ditemukan.',
+          });
+        }
+
+        if (sessionResult.rows[0].status !== 'IN_PROGRESS') {
+          await client.query('ROLLBACK');
+
+          return reply.code(400).send({
+            success: false,
+            message: 'Sesi ini sudah tidak dapat disetujui.',
+          });
+        }
+
+        // 3. Ambil informasi produk
+        const productResult = await client.query(
+          `SELECT id, sku
+           FROM products
+           WHERE id = $1`,
+          [product_id]
         );
+
+        if (productResult.rows.length === 0) {
+          await client.query('ROLLBACK');
+
+          return reply.code(404).send({
+            success: false,
+            message: 'Produk tidak ditemukan.',
+          });
+        }
+
+        const product = productResult.rows[0];
+
+        // 4. Catat penyesuaian ke stock_movements
+        const txCode = `TX-OPN-${Date.now()}`;
+
+        const ledgerResult = await client.query(
+          `INSERT INTO stock_movements (
+            tx_code,
+            movement_type,
+            product_id,
+            sku,
+            from_location,
+            to_location,
+            qty_change,
+            reference_doc,
+            performed_by_name,
+            performed_by
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          RETURNING *`,
+          [
+            txCode,
+            'STOCKTAKE_ADJUSTMENT',
+            product.id,
+            product.sku,
+            from_rack || 'Audit Opname Fisik',
+            to_rack || 'Koreksi Buku Besar',
+            diff_qty,
+            session_code,
+            user.full_name || user.username,
+            user.id,
+          ]
+        );
+
+        // 5. Perbarui status sesi opname
+        await client.query(
+          `UPDATE stocktake_sessions
+           SET status = 'DISETUJUI',
+               approved_by = $1,
+               approved_at = NOW()
+           WHERE id = $2`,
+          [user.id, sessionResult.rows[0].id]
+        );
+
         await client.query('COMMIT');
+
+        // 6. Kirim notifikasi MQTT
         publishRealtimeEvent('wms/stock/realtime', {
           event: 'STOCKTAKE_APPROVED',
           session_code,
-          ledgerEntry: ledgerRes.rows[0],
+          ledgerEntry: ledgerResult.rows[0],
         });
-        return reply.send({ success: true, ledger: ledgerRes.rows[0] });
-      } catch (err) {
+
+        return reply.send({
+          success: true,
+          message: 'Persetujuan stock opname berhasil.',
+          ledger: ledgerResult.rows[0],
+        });
+      } catch (error) {
         await client.query('ROLLBACK');
-        throw err;
+
+        console.error('[STOCKTAKE] Gagal menyetujui opname:', error);
+
+        return reply.code(500).send({
+          success: false,
+          message: 'Gagal memproses persetujuan stock opname.',
+        });
       } finally {
         client.release();
       }
     }
-
-    const prod = memoryStore.products.find((p) => p.id === Number(product_id));
-    const txCode = `TX-OPN-${Date.now().toString().slice(-4)}`;
-    const newLedger = {
-      id: memoryStore.stock_movements.length + 1,
-      tx_code: txCode,
-      movement_type: 'STOCKTAKE_ADJUSTMENT',
-      product_id: Number(product_id),
-      sku: prod?.sku || 'SKU-031',
-      product_name: prod?.name || 'Produk Audit',
-      from_location: from_rack || 'Audit Opname Fisik',
-      to_location: to_rack || 'Koreksi Buku Besar',
-      qty: Number(diff_qty),
-      reference_doc: session_code,
-      operator_name: 'Sarah Jenkins (Disetujui)',
-      created_at: new Date().toISOString(),
-    };
-    memoryStore.stock_movements.unshift(newLedger);
-    publishRealtimeEvent('wms/stock/realtime', {
-      event: 'STOCKTAKE_APPROVED',
-      session_code,
-      ledgerEntry: newLedger,
-    });
-
-    return reply.send({ success: true, ledger: newLedger });
-  });
+  );
 }
