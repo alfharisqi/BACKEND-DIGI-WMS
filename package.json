@@ -5,8 +5,14 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
-    "start": "node dist/server.js"
+    "build": "tsc --module commonjs --moduleResolution node",
+    "start": "node dist/server.js",
+    "test:orang1": "node --import tsx --test tests/orang1.test.ts",
+    "test:orang1:runtime": "node --test tests/start-built.test.mjs",
+    "test:orang1:mqtt": "node --import tsx --test tests/mqtt-transport.test.ts",
+    "test:orang1:audit": "node --import tsx --test tests/orang1-audit-migration.test.ts",
+    "test:orang1:supabase": "node --import tsx --test tests/supabase-contract.test.ts",
+    "test:orang1:emqx": "node --import tsx --test tests/emqx-qa.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",

@@ -1,0 +1,201 @@
+{
+  "info": {
+    "name": "DigiWMS Orang 1 — Production Read Only",
+    "_postman_id": "f01f4013-33aa-4b55-8a1e-a682d61e52a4",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Hanya tujuh GET. Tidak ada skrip sendRequest, migrasi, mutasi status, atau MQTT. Label health bukan bukti database."
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if(pm.request.method!=='GET')throw new Error('Production collection must remain GET-only.');"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "HEALTH Production (bukan bukti database)",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/health"
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Status OK',()=>pm.expect(j.status).to.eql('OK'));pm.test('JSON object',()=>pm.expect(j).to.be.an('object'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "READ daftar products",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/products"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.environment.unset('productionProductId');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Envelope',()=>pm.expect(j.success).to.eql(true));const re=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;pm.test('Array dan UUID',()=>{pm.expect(j.data).to.be.an('array');j.data.forEach(x=>pm.expect(x.id).to.match(re));});if(j.data.length&&re.test(j.data[0].id))pm.environment.set('productionProductId',j.data[0].id);else pm.execution.setNextRequest(null);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "READ detail products",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/products/{{productionProductId}}"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if(!pm.environment.get('productionProductId')){pm.request.url.update('http://127.0.0.1:1/NO-ID');if(pm.execution.skipRequest)pm.execution.skipRequest();throw new Error('Run list request first; empty dataset cannot validate detail.');}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Envelope',()=>pm.expect(j.success).to.eql(true));const re=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;pm.test('UUID utuh',()=>{pm.expect(j.data.id).to.match(re);pm.expect(j.data.id).to.eql(pm.environment.get('productionProductId'));});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "READ daftar grn",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/inbound/grn"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.environment.unset('productionGrnId');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Envelope',()=>pm.expect(j.success).to.eql(true));const re=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;pm.test('Array dan UUID',()=>{pm.expect(j.data).to.be.an('array');j.data.forEach(x=>pm.expect(x.id).to.match(re));});if(j.data.length&&re.test(j.data[0].id))pm.environment.set('productionGrnId',j.data[0].id);else pm.execution.setNextRequest(null);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "READ detail grn",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/inbound/grn/{{productionGrnId}}"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if(!pm.environment.get('productionGrnId')){pm.request.url.update('http://127.0.0.1:1/NO-ID');if(pm.execution.skipRequest)pm.execution.skipRequest();throw new Error('Run list request first; empty dataset cannot validate detail.');}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Envelope',()=>pm.expect(j.success).to.eql(true));const re=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;pm.test('UUID utuh',()=>{pm.expect(j.data.id).to.match(re);pm.expect(j.data.id).to.eql(pm.environment.get('productionGrnId'));});pm.test('Riwayat berupa array, boleh kosong',()=>pm.expect(j.data.audit_history).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "READ daftar tags",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/tags"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.environment.unset('productionTagId');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Envelope',()=>pm.expect(j.success).to.eql(true));const re=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;pm.test('Array dan UUID',()=>{pm.expect(j.data).to.be.an('array');j.data.forEach(x=>pm.expect(x.id).to.match(re));});if(j.data.length&&re.test(j.data[0].id))pm.environment.set('productionTagId',j.data[0].id);else pm.execution.setNextRequest(null);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "READ detail tags",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/api/tags/{{productionTagId}}"
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if(!pm.environment.get('productionTagId')){pm.request.url.update('http://127.0.0.1:1/NO-ID');if(pm.execution.skipRequest)pm.execution.skipRequest();throw new Error('Run list request first; empty dataset cannot validate detail.');}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('HTTP 200',()=>pm.response.to.have.status(200));const j=pm.response.json();pm.test('Envelope',()=>pm.expect(j.success).to.eql(true));const re=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;pm.test('UUID utuh',()=>{pm.expect(j.data.id).to.match(re);pm.expect(j.data.id).to.eql(pm.environment.get('productionTagId'));});pm.test('EPC legacy boleh dibaca',()=>pm.expect(j.data.epc).to.be.a('string'));pm.test('Riwayat berupa array, boleh kosong',()=>pm.expect(j.data.audit_history).to.be.an('array'));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

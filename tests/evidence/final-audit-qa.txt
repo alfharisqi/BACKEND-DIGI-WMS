@@ -1,0 +1,29 @@
+
+> digiwms-backend@1.0.0 test:orang1:audit
+> node --import tsx --test tests/orang1-audit-migration.test.ts
+
+▶ Supabase audit migration / disposable local PostgreSQL only
+  ✔ Canonical SQL creates only audit relations and preserves UUID, FKs, seed and default privileges (404.4333ms)
+  ✔ No reliance on Supabase default grants: migration also works with no defaults (288.1913ms)
+  ✔ anon, authenticated and service_role cannot read/write/truncate table or use/reset sequence (317.2078ms)
+  ✔ RLS default deny still protects anon/authenticated if SELECT/INSERT are accidentally regranted (302.5877ms)
+  ✔ Trusted non-owner BYPASSRLS role needs only SELECT/INSERT and sequence USAGE for repository audit (298.8942ms)
+  ✔ Verified postgres backend can read/write; service UUID verification/cancellation/deactivation match audit schema (333.1579ms)
+  ✔ Repository binds public and ignores search_path shadow audit tables (306.253ms)
+  ✔ Missing public audit cannot be masked by a shadow table; service rolls back status (284.6029ms)
+  ✔ Failure before COMMIT rolls back table, owned sequence, indexes and ACLs without altering source data (313.4442ms)
+  ✔ Repeated migration fails safely and preserves existing audit rows (305.3274ms)
+  ✔ Pre-existing unrelated same-name table is never silently altered or reused (291.9698ms)
+  ✔ Pre-existing same-name sequence is preserved on migration failure (277.9803ms)
+  ✔ Inherited client privileges abort deployment rather than changing unrelated role grants (324.5533ms)
+  ✔ Inherited sequence privilege also aborts the complete transaction (322.7584ms)
+  ✔ Verification SQL runs read-only before and after migration without reading payload rows (355.1496ms)
+✔ Supabase audit migration / disposable local PostgreSQL only (4782.1177ms)
+ℹ tests 15
+ℹ suites 1
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5008.6275

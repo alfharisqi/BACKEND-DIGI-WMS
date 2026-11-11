@@ -1,0 +1,3 @@
+
+> digiwms-backend@1.0.0 build
+> tsc --module commonjs --moduleResolution node

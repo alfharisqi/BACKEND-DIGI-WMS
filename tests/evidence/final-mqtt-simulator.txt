@@ -1,0 +1,15 @@
+
+> digiwms-backend@1.0.0 test:orang1:mqtt
+> node --import tsx --test tests/mqtt-transport.test.ts
+
+[EMQX MQTT] Terhubung ke broker mqtt://127.0.0.1:60500 sebagai digiwms_server_5f9867
+[EMQX MQTT] Aktif mendengarkan topik: wms/opname/+/scan & wms/gate/+/read
+✔ Existing MQTT helper publishes only successful committed encoding over MQTT TCP (781.256ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1012.434

@@ -1,0 +1,325 @@
+{
+  "at": "2026-11-11T04:51:18.133Z",
+  "newmanVersion": "6.2.3",
+  "checks": 34,
+  "runs": [
+    {
+      "label": "guard-production-url",
+      "expectedFailure": true,
+      "elapsedMs": 200,
+      "stats": {
+        "iterations": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "items": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "scripts": {
+          "total": 1,
+          "pending": 0,
+          "failed": 1
+        },
+        "prerequests": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "requests": {
+          "total": 0,
+          "pending": 0,
+          "failed": 0
+        },
+        "tests": {
+          "total": 0,
+          "pending": 0,
+          "failed": 0
+        },
+        "assertions": {
+          "total": 1,
+          "pending": 0,
+          "failed": 1
+        },
+        "testScripts": {
+          "total": 0,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequestScripts": {
+          "total": 1,
+          "pending": 0,
+          "failed": 1
+        }
+      },
+      "failures": 2
+    },
+    {
+      "label": "guard-unproven-database",
+      "expectedFailure": true,
+      "elapsedMs": 159,
+      "stats": {
+        "iterations": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "items": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "scripts": {
+          "total": 1,
+          "pending": 0,
+          "failed": 1
+        },
+        "prerequests": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "requests": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "tests": {
+          "total": 0,
+          "pending": 0,
+          "failed": 0
+        },
+        "assertions": {
+          "total": 1,
+          "pending": 0,
+          "failed": 1
+        },
+        "testScripts": {
+          "total": 0,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequestScripts": {
+          "total": 1,
+          "pending": 0,
+          "failed": 1
+        }
+      },
+      "failures": 2
+    },
+    {
+      "label": "guard-setup-failure",
+      "expectedFailure": true,
+      "elapsedMs": 308,
+      "stats": {
+        "iterations": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "items": {
+          "total": 2,
+          "pending": 0,
+          "failed": 0
+        },
+        "scripts": {
+          "total": 4,
+          "pending": 0,
+          "failed": 1
+        },
+        "prerequests": {
+          "total": 2,
+          "pending": 0,
+          "failed": 0
+        },
+        "requests": {
+          "total": 4,
+          "pending": 0,
+          "failed": 0
+        },
+        "tests": {
+          "total": 2,
+          "pending": 0,
+          "failed": 0
+        },
+        "assertions": {
+          "total": 7,
+          "pending": 0,
+          "failed": 2
+        },
+        "testScripts": {
+          "total": 2,
+          "pending": 0,
+          "failed": 1
+        },
+        "prerequestScripts": {
+          "total": 2,
+          "pending": 0,
+          "failed": 0
+        }
+      },
+      "failures": 3
+    },
+    {
+      "label": "qa-capability",
+      "expectedFailure": false,
+      "elapsedMs": 7793,
+      "stats": {
+        "iterations": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "items": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "scripts": {
+          "total": 152,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequests": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "requests": {
+          "total": 152,
+          "pending": 0,
+          "failed": 0
+        },
+        "tests": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "assertions": {
+          "total": 376,
+          "pending": 0,
+          "failed": 0
+        },
+        "testScripts": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequestScripts": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        }
+      },
+      "failures": 0
+    },
+    {
+      "label": "qa-strict",
+      "expectedFailure": false,
+      "elapsedMs": 7796,
+      "stats": {
+        "iterations": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "items": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "scripts": {
+          "total": 152,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequests": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "requests": {
+          "total": 152,
+          "pending": 0,
+          "failed": 0
+        },
+        "tests": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "assertions": {
+          "total": 374,
+          "pending": 0,
+          "failed": 0
+        },
+        "testScripts": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequestScripts": {
+          "total": 76,
+          "pending": 0,
+          "failed": 0
+        }
+      },
+      "failures": 0
+    },
+    {
+      "label": "production-readonly",
+      "expectedFailure": false,
+      "elapsedMs": 3044,
+      "stats": {
+        "iterations": {
+          "total": 1,
+          "pending": 0,
+          "failed": 0
+        },
+        "items": {
+          "total": 7,
+          "pending": 0,
+          "failed": 0
+        },
+        "scripts": {
+          "total": 20,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequests": {
+          "total": 7,
+          "pending": 0,
+          "failed": 0
+        },
+        "requests": {
+          "total": 7,
+          "pending": 0,
+          "failed": 0
+        },
+        "tests": {
+          "total": 7,
+          "pending": 0,
+          "failed": 0
+        },
+        "assertions": {
+          "total": 24,
+          "pending": 0,
+          "failed": 0
+        },
+        "testScripts": {
+          "total": 7,
+          "pending": 0,
+          "failed": 0
+        },
+        "prerequestScripts": {
+          "total": 13,
+          "pending": 0,
+          "failed": 0
+        }
+      },
+      "failures": 0
+    }
+  ]
+}
