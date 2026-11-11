@@ -1,0 +1,2163 @@
+{
+  "label": "qa-strict",
+  "startedAt": "2026-11-11T04:51:06.699Z",
+  "finishedAt": "2026-11-11T04:51:14.495Z",
+  "elapsedMs": 7796,
+  "stats": {
+    "iterations": {
+      "total": 1,
+      "pending": 0,
+      "failed": 0
+    },
+    "items": {
+      "total": 76,
+      "pending": 0,
+      "failed": 0
+    },
+    "scripts": {
+      "total": 152,
+      "pending": 0,
+      "failed": 0
+    },
+    "prerequests": {
+      "total": 76,
+      "pending": 0,
+      "failed": 0
+    },
+    "requests": {
+      "total": 152,
+      "pending": 0,
+      "failed": 0
+    },
+    "tests": {
+      "total": 76,
+      "pending": 0,
+      "failed": 0
+    },
+    "assertions": {
+      "total": 374,
+      "pending": 0,
+      "failed": 0
+    },
+    "testScripts": {
+      "total": 76,
+      "pending": 0,
+      "failed": 0
+    },
+    "prerequestScripts": {
+      "total": 76,
+      "pending": 0,
+      "failed": 0
+    }
+  },
+  "collectionItems": 76,
+  "guardPreflightRequests": 76,
+  "requests": [
+    {
+      "name": "01.00 — Mulai run QA",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Disposable database",
+          "status": "PASS"
+        },
+        {
+          "name": "MQTT spy",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.01 — CREATE produk tanpa relasi",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 10,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "productId UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "SKU",
+          "status": "PASS"
+        },
+        {
+          "name": "Nama",
+          "status": "PASS"
+        },
+        {
+          "name": "Harga",
+          "status": "PASS"
+        },
+        {
+          "name": "Minimum stok",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.02 — CREATE produk untuk relasi",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "productIdLinked UUID",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.03 — CREATE produk reassignment",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "productIdOther UUID",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.04 — READ daftar produk",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Daftar dan field produk",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.05 — READ detail produk",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "ID utuh",
+          "status": "PASS"
+        },
+        {
+          "name": "SKU",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.06 — UPDATE produk",
+      "method": "PUT",
+      "statusCode": 200,
+      "durationMs": 6,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID tidak berubah",
+          "status": "PASS"
+        },
+        {
+          "name": "Nama",
+          "status": "PASS"
+        },
+        {
+          "name": "SKU konsisten",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.07 — READ update persisted",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Nama tersimpan",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — SKU kosong",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — Nama kosong",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 1,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — Harga negatif",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — Minimum stok negatif",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 1,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — SKU duplikat",
+      "method": "POST",
+      "statusCode": 409,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — UUID tidak ditemukan",
+      "method": "GET",
+      "statusCode": 404,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 404",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.N — Format ID salah",
+      "method": "GET",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.08 — DELETE hanya produk QA tanpa relasi",
+      "method": "DELETE",
+      "statusCode": 200,
+      "durationMs": 10,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID terhapus",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "01.09 — GET setelah DELETE",
+      "method": "GET",
+      "statusCode": 404,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 404",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.01 — CREATE GRN verifikasi",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "grnId UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "PO",
+          "status": "PASS"
+        },
+        {
+          "name": "Supplier",
+          "status": "PASS"
+        },
+        {
+          "name": "Qty",
+          "status": "PASS"
+        },
+        {
+          "name": "Tanggal kalender",
+          "status": "PASS"
+        },
+        {
+          "name": "Status awal",
+          "status": "PASS"
+        },
+        {
+          "name": "RFID menunggu",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.02 — CREATE GRN pembatalan terpisah",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 6,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "grnIdCancel UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "Fixture berbeda",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.03 — READ daftar GRN",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Daftar",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.04 — READ detail GRN",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 10,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "Tanggal stabil",
+          "status": "PASS"
+        },
+        {
+          "name": "PO",
+          "status": "PASS"
+        },
+        {
+          "name": "Supplier",
+          "status": "PASS"
+        },
+        {
+          "name": "audit CREATE UUID dan snapshot",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.05 — UPDATE pending GRN",
+      "method": "PUT",
+      "statusCode": 200,
+      "durationMs": 9,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "ID tetap",
+          "status": "PASS"
+        },
+        {
+          "name": "Supplier",
+          "status": "PASS"
+        },
+        {
+          "name": "Qty",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.06 — READ GRN updated",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Supplier tersimpan",
+          "status": "PASS"
+        },
+        {
+          "name": "Qty tersimpan",
+          "status": "PASS"
+        },
+        {
+          "name": "Tanggal stabil",
+          "status": "PASS"
+        },
+        {
+          "name": "audit UPDATE UUID dan snapshot",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.07 — VERIFY GRN",
+      "method": "PATCH",
+      "statusCode": 200,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "SELESAI",
+          "status": "PASS"
+        },
+        {
+          "name": "verified_at",
+          "status": "PASS"
+        },
+        {
+          "name": "RFID tidak selesai otomatis",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Verifikasi ulang",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Edit GRN selesai",
+      "method": "PUT",
+      "statusCode": 409,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Cancel GRN selesai ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Pembatalan wajib alasan",
+      "method": "PATCH",
+      "statusCode": 400,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.08 — CANCEL atau penolakan constraint",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Constraint ditolak jelas",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Pembatalan ulang ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 6,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — GRN berdampak stok fixture QA",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Supplier kosong",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Qty nol",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Qty negatif",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Qty pecahan",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — Tanggal invalid",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 1,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — PO duplikat",
+      "method": "POST",
+      "statusCode": 409,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "02.N — GRN tidak ditemukan",
+      "method": "GET",
+      "statusCode": 404,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 404",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.01 — ENCODE label biasa dan item GRN",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 14,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "tagId UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "itemId UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC",
+          "status": "PASS"
+        },
+        {
+          "name": "Produk",
+          "status": "PASS"
+        },
+        {
+          "name": "Tag relasi",
+          "status": "PASS"
+        },
+        {
+          "name": "GRN relasi",
+          "status": "PASS"
+        },
+        {
+          "name": "Tag ENCODED",
+          "status": "PASS"
+        },
+        {
+          "name": "Item ENCODED",
+          "status": "PASS"
+        },
+        {
+          "name": "Native label",
+          "status": "PASS"
+        },
+        {
+          "name": "Mode",
+          "status": "PASS"
+        },
+        {
+          "name": "Tanpa konfirmasi fisik",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.02 — ENCODE ON_METAL untuk reassignment",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 12,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "tagIdReassign UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "Native ON_METAL",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.03 — ENCODE HARD_TAG untuk deactivate",
+      "method": "POST",
+      "statusCode": 201,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 201",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "tagIdDeactivate UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "Native HARD_TAG",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.04 — READ daftar RFID termasuk legacy QA",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 36,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Legacy EPC tetap terbaca",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.05 — READ detail RFID",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 9,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "ID",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC",
+          "status": "PASS"
+        },
+        {
+          "name": "Produk",
+          "status": "PASS"
+        },
+        {
+          "name": "SKU",
+          "status": "PASS"
+        },
+        {
+          "name": "Nama produk",
+          "status": "PASS"
+        },
+        {
+          "name": "Type API",
+          "status": "PASS"
+        },
+        {
+          "name": "Status",
+          "status": "PASS"
+        },
+        {
+          "name": "Item UUID",
+          "status": "PASS"
+        },
+        {
+          "name": "audit ENCODE_SIMULATION UUID dan snapshot",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.06 — UPDATE tipe RFID",
+      "method": "PATCH",
+      "statusCode": 200,
+      "durationMs": 15,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "ID tetap",
+          "status": "PASS"
+        },
+        {
+          "name": "Native type",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC tetap",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.07 — REASSIGN tag tanpa transaksi",
+      "method": "PATCH",
+      "statusCode": 200,
+      "durationMs": 11,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID tetap",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.08 — READ reassignment persisted",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Relasi baru",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC tetap",
+          "status": "PASS"
+        },
+        {
+          "name": "audit UPDATE UUID dan snapshot",
+          "status": "PASS"
+        },
+        {
+          "name": "Audit relasi before/after",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — EPC immutable",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Transisi IN_STOCK ilegal",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 20,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Reassign tag GRN ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 8,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Reassign tag transaksi fixture QA ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Deactivate tag transaksi ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Reassign ENCODED dengan ledger ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 7,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Deactivate ENCODED dengan ledger ditolak",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Deactivate wajib alasan",
+      "method": "PATCH",
+      "statusCode": 400,
+      "durationMs": 1,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.09 — DEACTIVATE atau penolakan constraint",
+      "method": "PATCH",
+      "statusCode": 409,
+      "durationMs": 15,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Constraint ditolak jelas",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — EPC tetap tidak boleh digunakan ulang",
+      "method": "POST",
+      "statusCode": 409,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — EPC pendek",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — EPC lebih 96 bit",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 1,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — EPC non-hex",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 1,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — EPC duplikat",
+      "method": "POST",
+      "statusCode": 409,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Produk tidak ditemukan",
+      "method": "POST",
+      "statusCode": 404,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 404",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Type invalid",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 6,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Hardware belum didukung",
+      "method": "POST",
+      "statusCode": 409,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "03.N — Tag tidak ditemukan",
+      "method": "GET",
+      "statusCode": 404,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 404",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.01 — Audit CREATE UPDATE VERIFY GRN",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 9,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "audit CREATE UUID dan snapshot",
+          "status": "PASS"
+        },
+        {
+          "name": "audit UPDATE UUID dan snapshot",
+          "status": "PASS"
+        },
+        {
+          "name": "audit VERIFY UUID dan snapshot",
+          "status": "PASS"
+        },
+        {
+          "name": "Before/after VERIFY",
+          "status": "PASS"
+        },
+        {
+          "name": "Tanggal tidak bergeser",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.02 — Audit CANCEL dan data tidak dihapus",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID dipertahankan",
+          "status": "PASS"
+        },
+        {
+          "name": "Status sesuai capability",
+          "status": "PASS"
+        },
+        {
+          "name": "Tidak ada audit CANCEL palsu",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.03 — Audit ENCODE UPDATE RFID",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "audit ENCODE_SIMULATION UUID dan snapshot",
+          "status": "PASS"
+        },
+        {
+          "name": "audit UPDATE UUID dan snapshot",
+          "status": "PASS"
+        },
+        {
+          "name": "Tipe persisted",
+          "status": "PASS"
+        },
+        {
+          "name": "Native persisted",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC tetap",
+          "status": "PASS"
+        },
+        {
+          "name": "Relasi tidak berubah",
+          "status": "PASS"
+        },
+        {
+          "name": "Snapshot tipe",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.04 — Audit DEACTIVATE dan retensi EPC item",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC retained",
+          "status": "PASS"
+        },
+        {
+          "name": "Item masih ada",
+          "status": "PASS"
+        },
+        {
+          "name": "Status",
+          "status": "PASS"
+        },
+        {
+          "name": "Tidak ada audit DEACTIVATE palsu",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.05 — DELETE produk berelasi ditolak",
+      "method": "DELETE",
+      "statusCode": 409,
+      "durationMs": 10,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.06 — READ produk berelasi tetap ada",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "ID utuh",
+          "status": "PASS"
+        },
+        {
+          "name": "Stok tidak naik karena encoding",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.07 — DELETE fixture stok dan ledger ditolak",
+      "method": "DELETE",
+      "statusCode": 409,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.08 — READ fixture stok tetap",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 4,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Stok retained",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.09 — DELETE produk hanya relasi ledger ditolak",
+      "method": "DELETE",
+      "statusCode": 409,
+      "durationMs": 6,
+      "assertions": [
+        {
+          "name": "HTTP 409",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "04.10 — READ produk ledger tanpa stok tetap ada",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "success envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID retained",
+          "status": "PASS"
+        },
+        {
+          "name": "Stok nol",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "05.01 — HEALTH QA",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 2,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Status",
+          "status": "PASS"
+        },
+        {
+          "name": "Identitas QA",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "05.02 — JSON malformed",
+      "method": "POST",
+      "statusCode": 400,
+      "durationMs": 3,
+      "assertions": [
+        {
+          "name": "HTTP 400",
+          "status": "PASS"
+        },
+        {
+          "name": "Native Fastify error status",
+          "status": "PASS"
+        },
+        {
+          "name": "Native message",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        },
+        {
+          "name": "Error message",
+          "status": "PASS"
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "expectedFailure": false
+}

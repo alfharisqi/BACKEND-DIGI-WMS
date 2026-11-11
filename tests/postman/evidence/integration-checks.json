@@ -1,0 +1,141 @@
+{
+  "at": "2026-11-11T04:51:18.133Z",
+  "checks": [
+    {
+      "name": "Official v2.1 schema + Postman SDK import: DigiWMS_Orang1_QA_CRUD.postman_collection.json",
+      "status": "PASS"
+    },
+    {
+      "name": "Official v2.1 schema + Postman SDK import: DigiWMS_Orang1_Production_ReadOnly.postman_collection.json",
+      "status": "PASS"
+    },
+    {
+      "name": "Production exactly seven GET; no sendRequest/runRequest or mutation scripts",
+      "status": "PASS"
+    },
+    {
+      "name": "Environment empty identities / no credentials: DigiWMS_Orang1_QA.postman_environment.json",
+      "status": "PASS"
+    },
+    {
+      "name": "Environment empty identities / no credentials: DigiWMS_Orang1_Production_ReadOnly.postman_environment.json",
+      "status": "PASS"
+    },
+    {
+      "name": "Collection rejects port 5000 before any API request",
+      "status": "PASS"
+    },
+    {
+      "name": "Unproven database is rejected; zero writes reached target",
+      "status": "PASS"
+    },
+    {
+      "name": "Server database identity: exact task-owned disposable data_directory",
+      "status": "PASS"
+    },
+    {
+      "name": "Failed product setup stops collection before subsequent CRUD",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: ledger unchanged; encoding made no movement",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: fixture product/GRN/tag untouched",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: no item/product/tag orphan",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: ledger tag/product relationship consistent",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: native UUID item/product/tag/GRN relationship",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: reassignment persisted in items",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: deleted QA product retained in audit",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: failed operations leave no extra audit",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: all audit entity IDs retain UUID strings",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: damaged/encoded EPC and item retained",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: exactly three simulated publisher spy calls",
+      "status": "PASS"
+    },
+    {
+      "name": "DB true: server refuses un-attested mutation",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: ledger unchanged; encoding made no movement",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: fixture product/GRN/tag untouched",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: no item/product/tag orphan",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: ledger tag/product relationship consistent",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: native UUID item/product/tag/GRN relationship",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: reassignment persisted in items",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: deleted QA product retained in audit",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: failed operations leave no extra audit",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: all audit entity IDs retain UUID strings",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: damaged/encoded EPC and item retained",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: exactly three simulated publisher spy calls",
+      "status": "PASS"
+    },
+    {
+      "name": "DB false: server refuses un-attested mutation",
+      "status": "PASS"
+    },
+    {
+      "name": "Existing source/config/env/migrations unchanged by runner",
+      "status": "PASS"
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "label": "guard-unproven-database",
+  "startedAt": "2026-11-11T04:49:50.117Z",
+  "finishedAt": "2026-11-11T04:49:50.276Z",
+  "elapsedMs": 159,
+  "stats": {
+    "iterations": {
+      "total": 1,
+      "pending": 0,
+      "failed": 0
+    },
+    "items": {
+      "total": 1,
+      "pending": 0,
+      "failed": 0
+    },
+    "scripts": {
+      "total": 1,
+      "pending": 0,
+      "failed": 1
+    },
+    "prerequests": {
+      "total": 1,
+      "pending": 0,
+      "failed": 0
+    },
+    "requests": {
+      "total": 1,
+      "pending": 0,
+      "failed": 0
+    },
+    "tests": {
+      "total": 0,
+      "pending": 0,
+      "failed": 0
+    },
+    "assertions": {
+      "total": 1,
+      "pending": 0,
+      "failed": 1
+    },
+    "testScripts": {
+      "total": 0,
+      "pending": 0,
+      "failed": 0
+    },
+    "prerequestScripts": {
+      "total": 1,
+      "pending": 0,
+      "failed": 1
+    }
+  },
+  "collectionItems": 1,
+  "guardPreflightRequests": 0,
+  "requests": [
+    {
+      "name": "01.00 — Mulai run QA",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 25,
+      "assertions": [
+        {
+          "name": "QA safety guard: Target has no disposable PostgreSQL proof.",
+          "status": "FAIL",
+          "error": "Target has no disposable PostgreSQL proof."
+        }
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "at": "assertion:0 in test-script",
+      "name": "Error",
+      "message": "Target has no disposable PostgreSQL proof."
+    },
+    {
+      "at": "prerequest-script:39:17",
+      "name": "AssertionFailure",
+      "message": "QA safety guard: Target has no disposable PostgreSQL proof."
+    }
+  ],
+  "expectedFailure": true
+}

@@ -1,0 +1,3286 @@
+{
+  "info": {
+    "name": "DigiWMS Orang 1 — QA CRUD API Testing",
+    "_postman_id": "5cb5242b-997e-4e62-b37b-ee0794caf7aa",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "HANYA server disposable tests/postman/run.ts. Port 5000 Production ditolak. Mulai dari request 01.00. Tidak ada migrasi atau koneksi MQTT."
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Safe even on runtimes lacking skipRequest: fail closed by replacing the URL first.",
+          "function deny(message){pm.request.url.update('http://127.0.0.1:1/QA-BLOCKED');pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);pm.test('QA safety guard: '+message,()=>{throw new Error(message);});if(pm.execution.skipRequest)pm.execution.skipRequest();throw new Error(message);}",
+          "const base=pm.environment.get('baseUrl');",
+          "if(!/^http:\\/\\/(127\\.0\\.0\\.1|localhost):5001$/.test(base||''))deny('QA requires dedicated loopback port 5001; port 5000 is Production.');",
+          "if(pm.info.requestName==='01.00 — Mulai run QA'){",
+          " ['productId','productIdLinked','productIdOther','grnId','grnIdCancel','tagId','tagIdReassign','tagIdDeactivate','itemId','qaNonce'].forEach(k=>pm.environment.unset(k));",
+          " pm.environment.set('qaFailed','false');",
+          " const run=pm.variables.replaceIn('{{$guid}}').replace(/-/g,'');",
+          " pm.environment.set('qaRunId',run);pm.environment.set('qaSku','QA-O1-SKU-'+run);pm.environment.set('qaPoNumber','QA-O1-PO-'+run);",
+          " ['epc','epcReassign','epcDeactivate','epcUnused'].forEach(k=>pm.environment.set(k,pm.variables.replaceIn('{{$guid}}').replace(/-/g,'').slice(0,24).toUpperCase()));",
+          " pm.environment.set('missingId',pm.variables.replaceIn('{{$guid}}'));",
+          "}",
+          "if(pm.environment.get('qaFailed')==='true'||!pm.environment.get('qaRunId'))deny('Setup failed or run not started. Run the collection from 01.00.');",
+          "if(/{{[^}]+}}/.test(pm.variables.replaceIn(pm.request.url.toString())) || /{{[^}]+}}/.test(pm.variables.replaceIn(pm.request.body&&pm.request.body.raw||'')))deny('Unresolved dependency variable.');",
+          "pm.sendRequest(base+'/api/health',(err,res)=>{",
+          " if(err||res.code!==200) return deny('QA attestation unavailable.');",
+          " let h;try{h=res.json();}catch(e){return deny('Invalid QA health JSON.');}",
+          " if(!h.qa||h.qa.kind!=='digiwms-postman-disposable-pg'||h.qa.isolated!==true||h.qa.mqtt!=='spy'||!/^orang1_postman_[a-f0-9]{32}$/.test(h.qa.schema)||!h.qa.nonce)return deny('Target has no disposable PostgreSQL proof.');",
+          " const old=pm.environment.get('qaNonce');if(old&&old!==h.qa.nonce)return deny('QA process changed during run.');",
+          " pm.environment.set('qaNonce',h.qa.nonce);pm.environment.set('supportsExtendedStatus',String(h.qa.extended));",
+          " Object.keys(h.qa.fixtures).forEach(k=>pm.environment.set(k,h.qa.fixtures[k]));",
+          " pm.request.headers.upsert({key:'X-Orang1-QA-Nonce',value:h.qa.nonce});",
+          " pm.request.headers.upsert({key:'X-Orang1-QA-Run',value:pm.environment.get('qaRunId')});",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 — MASTER SKU / PRODUCTS",
+      "item": [
+        {
+          "name": "01.00 — Mulai run QA",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/health",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('Disposable database',j.qa.isolated,true);eq('MQTT spy',j.qa.mqtt,'spy');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.01 — CREATE produk tanpa relasi",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('productId',d.id);eq('SKU',d.sku,V('qaSku'));eq('Nama',d.name,'Produk Sintetis QA');eq('Harga',Number(d.unit_price),12500.5);eq('Minimum stok',d.min_stock_threshold,2);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.02 — CREATE produk untuk relasi",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}-L\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('productIdLinked',d.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.03 — CREATE produk reassignment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}-R\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('productIdOther',d.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.04 — READ daftar produk",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Daftar dan field produk',()=>{pm.expect(d).to.be.an('array');const p=d.find(x=>x.id===V('productId'));pm.expect(p.sku).to.eql(V('qaSku'));pm.expect(Number(p.price)).to.eql(12500.5);pm.expect(p.min_stock_alert).to.eql(2);pm.expect(p.current_stock).to.eql(0);});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.05 — READ detail produk",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "id('UUID',d.id);eq('ID utuh',d.id,V('productId'));eq('SKU',d.sku,V('qaSku'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.06 — UPDATE produk",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}\",\n  \"name\": \"Produk QA Diperbarui\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('UUID tidak berubah',d.id,V('productId'));eq('Nama',d.name,'Produk QA Diperbarui');eq('SKU konsisten',d.sku,V('qaSku'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.07 — READ update persisted",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('Nama tersimpan',d.name,'Produk QA Diperbarui');eq('UUID',d.id,V('productId'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — SKU kosong",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — Nama kosong",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}\",\n  \"name\": \"\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — Harga negatif",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": -1,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — Minimum stok negatif",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": -1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — SKU duplikat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{qaSku}}\",\n  \"name\": \"Produk Sintetis QA\",\n  \"category\": \"QA Orang 1\",\n  \"price\": 12500.5,\n  \"min_stock_alert\": 2\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — UUID tidak ditemukan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{missingId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(404),pm.response.code,404);",
+                  "eq('success envelope',j.success,(404)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.N — Format ID salah",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/bukan-id",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.08 — DELETE hanya produk QA tanpa relasi",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('UUID terhapus',d.id,V('productId'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "01.09 — GET setelah DELETE",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(404),pm.response.code,404);",
+                  "eq('success envelope',j.success,(404)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "02 — INBOUND GRN",
+      "item": [
+        {
+          "name": "02.01 — CREATE GRN verifikasi",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 3,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('grnId',d.id);eq('PO',d.po_number,V('qaPoNumber'));eq('Supplier',d.supplier_name,'Supplier Sintetis QA');eq('Qty',d.total_qty,3);eq('Tanggal kalender',d.receipt_date,'2026-11-05');eq('Status awal',d.status,'MENUNGGU_VERIFIKASI');eq('RFID menunggu',d.rfid_tagging_status,'MENUNGGU_TAGGING');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.02 — CREATE GRN pembatalan terpisah",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}-C\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 3,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('grnIdCancel',d.id);T('Fixture berbeda',()=>pm.expect(d.id).not.eql(V('grnId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.03 — READ daftar GRN",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Daftar',()=>pm.expect(d).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.04 — READ detail GRN",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('UUID',d.id,V('grnId'));eq('Tanggal stabil',d.receipt_date,'2026-11-05');eq('PO',d.po_number,V('qaPoNumber'));eq('Supplier',d.supplier_name,'Supplier Sintetis QA');history('CREATE','grn','grnId');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.05 — UPDATE pending GRN",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}\",\n  \"supplier_name\": \"Supplier QA Diperbarui\",\n  \"total_qty\": 4,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('ID tetap',d.id,V('grnId'));eq('Supplier',d.supplier_name,'Supplier QA Diperbarui');eq('Qty',d.total_qty,4);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.06 — READ GRN updated",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('Supplier tersimpan',d.supplier_name,'Supplier QA Diperbarui');eq('Qty tersimpan',d.total_qty,4);eq('Tanggal stabil',d.receipt_date,'2026-11-05');history('UPDATE','grn','grnId');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.07 — VERIFY GRN",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}/verify",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('SELESAI',d.status,'SELESAI');T('verified_at',()=>pm.expect(Number.isNaN(Date.parse(d.verified_at))).to.eql(false));eq('RFID tidak selesai otomatis',d.rfid_tagging_status,'MENUNGGU_TAGGING');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Verifikasi ulang",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}/verify",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Edit GRN selesai",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 3,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Cancel GRN selesai ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}/cancel",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Pembatalan wajib alasan",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnIdCancel}}/cancel",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.08 — CANCEL atau penolakan constraint",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnIdCancel}}/cancel",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+((V('supportsExtendedStatus')==='true'?200:409)),pm.response.code,(V('supportsExtendedStatus')==='true'?200:409));",
+                  "eq('success envelope',j.success,((V('supportsExtendedStatus')==='true'?200:409))<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "if(V('supportsExtendedStatus')==='true')eq('DIBATALKAN',d.status,'DIBATALKAN');else T('Constraint ditolak jelas',()=>pm.expect(j.message).to.include('belum mendukung'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Pembatalan ulang ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnIdCancel}}/cancel",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — GRN berdampak stok fixture QA",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{fixtureGrnId}}/cancel",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Supplier kosong",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}-INVALID\",\n  \"supplier_name\": \"\",\n  \"total_qty\": 3,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Qty nol",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}-INVALID\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 0,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Qty negatif",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}-INVALID\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": -1,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Qty pecahan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}-INVALID\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 1.5,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — Tanggal invalid",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}-INVALID\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 3,\n  \"receipt_date\": \"2026-02-30\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — PO duplikat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"po_number\": \"{{qaPoNumber}}\",\n  \"supplier_name\": \"Supplier Sintetis QA\",\n  \"total_qty\": 3,\n  \"receipt_date\": \"2026-11-05\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "02.N — GRN tidak ditemukan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{missingId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(404),pm.response.code,404);",
+                  "eq('success envelope',j.success,(404)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 — RFID TAGGING / ENCODING",
+      "item": [
+        {
+          "name": "03.01 — ENCODE label biasa dan item GRN",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epc}}\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\",\n  \"grn_id\": \"{{grnId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('tagId',d.tag.id);capture('itemId',d.item.id);eq('EPC',d.tag.epc,V('epc'));eq('Produk',d.item.product_id,V('productIdLinked'));eq('Tag relasi',d.item.tag_id,d.tag.id);eq('GRN relasi',d.item.grn_id,V('grnId'));eq('Tag ENCODED',d.tag.status,'ENCODED');eq('Item ENCODED',d.item.status,'ENCODED');eq('Native label',d.tag.tag_type,'Label Biasa (UHF)');eq('Mode',d.mode,'simulation');eq('Tanpa konfirmasi fisik',d.hardware_confirmed,false);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.02 — ENCODE ON_METAL untuk reassignment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epcReassign}}\",\n  \"type\": \"ON_METAL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('tagIdReassign',d.tag.id);eq('Native ON_METAL',d.tag.tag_type,'On-Metal (Logam/Cairan)');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.03 — ENCODE HARD_TAG untuk deactivate",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epcDeactivate}}\",\n  \"type\": \"HARD_TAG\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(201),pm.response.code,201);",
+                  "eq('success envelope',j.success,(201)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "capture('tagIdDeactivate',d.tag.id);eq('Native HARD_TAG',d.tag.tag_type,'Hard Tag (Aset)');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.04 — READ daftar RFID termasuk legacy QA",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Legacy EPC tetap terbaca',()=>{pm.expect(d).to.be.an('array');const t=d.find(x=>x.id===V('fixtureTagId'));pm.expect(t.epc).to.eql('QA-LEGACY-EPC');});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.05 — READ detail RFID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('ID',d.id,V('tagId'));eq('EPC',d.epc,V('epc'));eq('Produk',d.product_id,V('productIdLinked'));eq('SKU',d.sku,V('qaSku')+'-L');eq('Nama produk',d.product_name,'Produk Sintetis QA');eq('Type API',d.type,'STANDARD_LABEL');eq('Status',d.status,'ENCODED');eq('Item UUID',d.item_id,V('itemId'));history('ENCODE_SIMULATION','tag','tagId');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.06 — UPDATE tipe RFID",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"ON_METAL\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('ID tetap',d.id,V('tagId'));eq('Native type',d.tag_type,'On-Metal (Logam/Cairan)');eq('EPC tetap',d.epc,V('epc'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.07 — REASSIGN tag tanpa transaksi",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagIdReassign}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdOther}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('UUID tetap',d.id,V('tagIdReassign'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.08 — READ reassignment persisted",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagIdReassign}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('Relasi baru',d.product_id,V('productIdOther'));eq('EPC tetap',d.epc,V('epcReassign'));history('UPDATE','tag','tagIdReassign');T('Audit relasi before/after',()=>{const a=d.audit_history.find(x=>x.action==='UPDATE');pm.expect(a.before_data.product_id).to.eql(V('productIdLinked'));pm.expect(a.after_data.product_id).to.eql(V('productIdOther'));});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — EPC immutable",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"epc\": \"{{epcReassign}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Transisi IN_STOCK ilegal",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"IN_STOCK\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Reassign tag GRN ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdOther}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Reassign tag transaksi fixture QA ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{fixtureTagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdOther}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Deactivate tag transaksi ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{fixtureTagId}}/deactivate",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Reassign ENCODED dengan ledger ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{fixtureTransactionTagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdOther}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Deactivate ENCODED dengan ledger ditolak",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{fixtureTransactionTagId}}/deactivate",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Deactivate wajib alasan",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagIdDeactivate}}/deactivate",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.09 — DEACTIVATE atau penolakan constraint",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagIdDeactivate}}/deactivate",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA Orang 1: pemeriksaan alasan dan riwayat\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+((V('supportsExtendedStatus')==='true'?200:409)),pm.response.code,(V('supportsExtendedStatus')==='true'?200:409));",
+                  "eq('success envelope',j.success,((V('supportsExtendedStatus')==='true'?200:409))<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "if(V('supportsExtendedStatus')==='true')eq('DAMAGED',d.status,'DAMAGED');else T('Constraint ditolak jelas',()=>pm.expect(j.message).to.include('belum mendukung'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — EPC tetap tidak boleh digunakan ulang",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epcDeactivate}}\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — EPC pendek",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"1234\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — EPC lebih 96 bit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"AAAAAAAAAAAAAAAAAAAAAAAAAA\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — EPC non-hex",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"ZZZZZZZZZZZZZZZZZZZZZZZZ\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — EPC duplikat",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epc}}\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Produk tidak ditemukan",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{missingId}}\",\n  \"epc_custom\": \"{{epcUnused}}\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(404),pm.response.code,404);",
+                  "eq('success envelope',j.success,(404)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Type invalid",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epc}}\",\n  \"type\": \"INVALID\",\n  \"mode\": \"simulation\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('success envelope',j.success,(400)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Hardware belum didukung",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/encode",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product_id\": \"{{productIdLinked}}\",\n  \"epc_custom\": \"{{epc}}\",\n  \"type\": \"STANDARD_LABEL\",\n  \"mode\": \"hardware\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "03.N — Tag tidak ditemukan",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{missingId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(404),pm.response.code,404);",
+                  "eq('success envelope',j.success,(404)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "04 — AUDIT TRAIL & DATA INTEGRITY",
+      "item": [
+        {
+          "name": "04.01 — Audit CREATE UPDATE VERIFY GRN",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "history('CREATE','grn','grnId');history('UPDATE','grn','grnId');history('VERIFY','grn','grnId');T('Before/after VERIFY',()=>{const a=d.audit_history.find(x=>x.action==='VERIFY');pm.expect(a.before_data.status).to.eql('MENUNGGU_VERIFIKASI');pm.expect(a.after_data.status).to.eql('SELESAI');pm.expect(d.audit_history.filter(x=>x.action==='VERIFY')).to.have.length(1);});eq('Tanggal tidak bergeser',d.receipt_date,'2026-11-05');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.02 — Audit CANCEL dan data tidak dihapus",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/inbound/grn/{{grnIdCancel}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('UUID dipertahankan',d.id,V('grnIdCancel'));eq('Status sesuai capability',d.status,V('supportsExtendedStatus')==='true'?'DIBATALKAN':'MENUNGGU_VERIFIKASI');if(V('supportsExtendedStatus')==='true'){history('CANCEL','grn','grnIdCancel');T('Alasan dan snapshot CANCEL',()=>{const a=d.audit_history.find(x=>x.action==='CANCEL');pm.expect(a.reason).to.eql(\"QA Orang 1: pemeriksaan alasan dan riwayat\");pm.expect(a.before_data.status).to.eql('MENUNGGU_VERIFIKASI');pm.expect(a.after_data.status).to.eql('DIBATALKAN');});}else eq('Tidak ada audit CANCEL palsu',d.audit_history.filter(x=>x.action==='CANCEL').length,0);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.03 — Audit ENCODE UPDATE RFID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "history('ENCODE_SIMULATION','tag','tagId');history('UPDATE','tag','tagId');eq('Tipe persisted',d.type,'ON_METAL');eq('Native persisted',d.tag_type,'On-Metal (Logam/Cairan)');eq('EPC tetap',d.epc,V('epc'));eq('Relasi tidak berubah',d.product_id,V('productIdLinked'));T('Snapshot tipe',()=>{const a=d.audit_history.find(x=>x.action==='UPDATE');pm.expect(a.before_data.tag_type).to.eql('Label Biasa (UHF)');pm.expect(a.after_data.tag_type).to.eql('On-Metal (Logam/Cairan)');});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.04 — Audit DEACTIVATE dan retensi EPC item",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/tags/{{tagIdDeactivate}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('EPC retained',d.epc,V('epcDeactivate'));id('Item masih ada',d.item_id);eq('Status',d.status,V('supportsExtendedStatus')==='true'?'DAMAGED':'ENCODED');if(V('supportsExtendedStatus')==='true'){history('DEACTIVATE','tag','tagIdDeactivate');T('Alasan dan snapshot DEACTIVATE',()=>{const a=d.audit_history.find(x=>x.action==='DEACTIVATE');pm.expect(a.reason).to.eql(\"QA Orang 1: pemeriksaan alasan dan riwayat\");pm.expect(a.before_data.status).to.eql('ENCODED');pm.expect(a.after_data.status).to.eql('DAMAGED');});}else eq('Tidak ada audit DEACTIVATE palsu',d.audit_history.filter(x=>x.action==='DEACTIVATE').length,0);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.05 — DELETE produk berelasi ditolak",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productIdLinked}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.06 — READ produk berelasi tetap ada",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{productIdLinked}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('ID utuh',d.id,V('productIdLinked'));eq('Stok tidak naik karena encoding',d.current_stock,0);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.07 — DELETE fixture stok dan ledger ditolak",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{fixtureProductId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.08 — READ fixture stok tetap",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{fixtureProductId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('Stok retained',d.current_stock,7);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.09 — DELETE produk hanya relasi ledger ditolak",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{fixtureLedgerProductId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(409),pm.response.code,409);",
+                  "eq('success envelope',j.success,(409)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "04.10 — READ produk ledger tanpa stok tetap ada",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products/{{fixtureLedgerProductId}}",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "eq('success envelope',j.success,(200)<400);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('UUID retained',d.id,V('fixtureLedgerProductId'));eq('Stok nol',d.current_stock,0);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "05 — HEALTH CHECK & NEGATIVE TESTS",
+      "item": [
+        {
+          "name": "05.01 — HEALTH QA",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/health",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(200),pm.response.code,200);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "eq('Status',j.status,'OK');eq('Identitas QA',j.qa.kind,'digiwms-postman-disposable-pg');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "05.02 — JSON malformed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/products",
+            "description": "QA disposable PostgreSQL saja. Jalankan dari awal koleksi; assertion gagal menghentikan urutan.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sku\":",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json(), d = j.data;",
+                  "const V = k => pm.environment.get(k);",
+                  "const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;",
+                  "function T(n,f) { pm.test(n,()=>{try{f();}catch(e){pm.environment.set('qaFailed','true');pm.execution.setNextRequest(null);throw e;}}); }",
+                  "function eq(n,a,b){T(n,()=>pm.expect(a).to.eql(b));}",
+                  "function id(n,v){T(n,()=>pm.expect(v).to.match(uuid));}",
+                  "function capture(k,v){id(k+' UUID',v);if(uuid.test(v))pm.environment.set(k,v);}",
+                  "function history(action,entity,k){T('audit '+action+' UUID dan snapshot',()=>{const a=d.audit_history.find(x=>x.action===action);pm.expect(a,'audit '+action).to.be.an('object');pm.expect(a.entity_type).to.eql(entity);pm.expect(a.entity_id).to.eql(V(k));pm.expect(a.after_data).to.be.an('object');pm.expect(a.created_at).to.be.a('string');if(action!=='CREATE'&&action!=='ENCODE_SIMULATION')pm.expect(a.before_data).to.be.an('object');});}",
+                  "eq('HTTP '+(400),pm.response.code,400);",
+                  "eq('Native Fastify error status',j.statusCode,400);T('Native message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  "T('JSON object',()=>pm.expect(j).to.be.an('object'));",
+                  "T('Error message',()=>pm.expect(j.message).to.be.a('string').and.not.empty);",
+                  ""
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
