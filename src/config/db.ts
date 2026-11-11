@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const db = new Pool({
   connectionString:
@@ -10,7 +11,12 @@ export const db = new Pool({
     'postgresql://digiwms:digiwms_pass@localhost:5432/digiwms_db',
   max: 15,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 5000,
+  ssl:
+    process.env.DATABASE_URL?.includes('supabase.com') ||
+    process.env.DATABASE_URL?.includes('sslmode=require')
+      ? { rejectUnauthorized: false }
+      : undefined,
 });
 
 export let isPostgresConnected = false;
@@ -21,11 +27,27 @@ export let isPostgresConnected = false;
  */
 export const memoryStore = {
   users: [
-    { id: 1, username: 'sarah.jenkins', full_name: 'Sarah Jenkins', role: 'SUPERVISOR', is_active: true, created_at: new Date().toISOString() },
-    { id: 2, username: 'admin.wms', full_name: 'Budi Santoso (Admin)', role: 'ADMIN', is_active: true, created_at: new Date().toISOString() },
-    { id: 3, username: 'operator.inbound', full_name: 'Andi Pratama (Inbound)', role: 'WAREHOUSE_STAFF', is_active: true, created_at: new Date().toISOString() },
-    { id: 4, username: 'security.gate', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: new Date().toISOString() },
+    { id: 1, username: 'sarah.jenkins', password_hash: '$2b$10$Jyeai7wjGzfPzv24W058cuxSSapbSkEXa2opxwIA02mJnrVlMI9oq', full_name: 'Sarah Jenkins', role: 'SUPERVISOR', is_active: true, created_at: '2026-05-01T08:00:00.000Z' },
+    { id: 2, username: 'admin.wms', password_hash: '$2b$10$d1.oqA8VE4yah4LNHPT93Ocho6tmG2fdpUNrp/yVwWziVuoiEL6Ne', full_name: 'Budi Santoso (Admin)', role: 'ADMIN', is_active: true, created_at: '2026-05-01T08:05:00.000Z' },
+    { id: 3, username: 'operator.inbound', password_hash: '$2b$10$TGWOkgjXzuVNEwc2Vb9CpO9RZk4TQW6M8FZZa.9lxH7M487IkWBK2', full_name: 'Andi Pratama (Inbound)', role: 'WAREHOUSE_STAFF', is_active: true, created_at: '2026-05-02T09:00:00.000Z' },
+    { id: 4, username: 'security.gate', password_hash: '$2b$10$AGmWAzwPRVCJseG9FCCA7.OFjcnejUeUnOqPLgKDzAxxpll.iLsgS', full_name: 'Komandan Hendra (Gate)', role: 'SECURITY', is_active: true, created_at: '2026-05-02T09:30:00.000Z' },
   ],
+  audit_logs: [
+    { id: 1, user_id: 2, user_name: 'Budi Santoso (Admin)', action: 'INIT_SYSTEM', payload: { role: 'ADMIN', note: 'Inisialisasi Server DIGI WMS & Broker EMQX' } as Record<string, unknown>, created_at: '2026-05-12T08:00:00.000Z' },
+    { id: 2, user_id: 1, user_name: 'Sarah Jenkins', action: 'VERIFY_GRN', payload: { role: 'SUPERVISOR', po_number: 'PO-2026-8901', qty: 150, note: 'Verifikasi surat jalan PO-2026-8901 (150 unit)' } as Record<string, unknown>, created_at: '2026-05-12T09:30:00.000Z' },
+    { id: 3, user_id: 1, user_name: 'Sarah Jenkins', action: 'UPDATE_RFID_SETTINGS', payload: { role: 'SUPERVISOR', rssi_threshold: '-65 dBm', freq: '920-923 MHz', note: 'Kalibrasi ambang batas RSSI gerbang ke -65 dBm' } as Record<string, unknown>, created_at: '2026-05-12T10:15:00.000Z' },
+  ],
+  gate_events: [] as Array<Record<string, unknown>>,
+  settings: {
+    warehouse_name: 'Gudang Utama DIGI WMS — Jakarta Pusat',
+    rfid_frequency: '920 - 923 MHz (Standar Kominfo Indonesia)',
+    gate_rssi_threshold_dbm: -65,
+    dedup_window_seconds: 5,
+    default_min_stock_alert: 20,
+    emqx_ws_url: 'ws://localhost:8083/mqtt',
+    auto_low_stock_notif: true,
+    updated_at: new Date().toISOString(),
+  },
   products: [
     { id: 1, sku: 'SKU-012', name: 'Mouse Wireless Ergonomic', category: 'Aksesoris Komputer', min_stock_alert: 20, price: 185000 },
     { id: 2, sku: 'SKU-018', name: 'Keyboard Mechanical RGB', category: 'Periferal Gaming', min_stock_alert: 20, price: 650000 },
@@ -89,10 +111,12 @@ export async function checkDatabaseConnection(): Promise<boolean> {
     isPostgresConnected = true;
     console.log(`[PostgreSQL] Terhubung ke database pada: ${res.rows[0].server_time}`);
     return true;
-  } catch {
+  } catch (err: any) {
     isPostgresConnected = false;
     console.log(
-      '[Database] Docker PostgreSQL belum aktif -> Menggunakan In-Memory Ledger Store (Siap Pakai)'
+      `[Database] PostgreSQL (${
+        process.env.DATABASE_URL?.includes('supabase') ? 'Supabase Cloud' : 'Local/Docker'
+      }) belum terhubung (${err?.message || 'Offline'}) -> Menggunakan In-Memory Ledger Store (Siap Pakai)`
     );
     return false;
   }

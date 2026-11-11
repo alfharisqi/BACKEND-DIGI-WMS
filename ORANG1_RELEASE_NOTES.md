@@ -15,6 +15,7 @@ Regresi terbatas menemukan rollback fallback memory memperlakukan objek `setting
 - **PREVIOUSLY TESTED:** 158 PASS, 0 FAIL, 4 SKIP pada laporan integrasi 9 November; bukti text tersedia di `tests/evidence/final-*.txt` dan pada frontend untuk 11 tes helper.
 - **PREVIOUSLY TESTED:** Newman 11 November: capability 376 assertion PASS, strict 374 PASS, Production tujuh GET/24 PASS; 34 pemeriksaan tambahan PASS. Bukti `tests/postman/evidence/` dan `ORANG1_API_TEST_REPORT.md`. Angka ini tidak dihitung ulang sebagai tes release.
 - **PASSED sebelum sinkronisasi:** backend build; enam regression test `tests/orang1-main-integration.test.ts` untuk kompatibilitas `main` dan rollback.
+- **PASSED setelah sinkronisasi:** backend build, enam regression test yang sama, dan satu startup HTTP hasil build memakai fallback disposable (DATABASE_URL serta broker proses anak diarahkan ke port 1). Tidak dibuat cluster/fixture PostgreSQL baru. Konflik hanya pada `orang1-inbound/routes.ts`; seluruh konfigurasi SSL/JWT dan modul Orang 2/3/4 identik dengan `origin/main`.
 - **NOT RUN:** pengulangan seluruh collection Postman/Newman, write Production, migrasi/deployment, dan publish MQTT bisnis selama release.
 
 Artefak tes sebelumnya berasal dari working tree sebelum commit, sehingga tidak mengandung SHA commit release. Perubahan release pada adapter/alias dan rollback dijelaskan di atas; bukti lama tidak diklaim sebagai eksekusi terhadap SHA hasil merge. Build dan regresi terbatas diulang setelah sinkronisasi, lalu dicatat pada PR/laporan release.
