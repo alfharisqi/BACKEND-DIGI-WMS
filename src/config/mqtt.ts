@@ -2,7 +2,7 @@ import mqtt, { MqttClient } from 'mqtt';
 import dotenv from 'dotenv';
 import path from 'path';
 
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
 const BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
 const CLIENT_ID = `${process.env.MQTT_CLIENT_ID_PREFIX || 'digiwms_api_'}${Math.random()
