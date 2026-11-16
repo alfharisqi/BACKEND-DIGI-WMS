@@ -168,7 +168,7 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
     return { success: true, data: memoryStore.stocktake_sessions };
   });
 
-  
+
   // 2. POST Mengirim Hasil Scan RFID ke Sesi Stock Opname
   app.post('/api/stocktake/scan-submit', async (request, reply) => {
     try {
@@ -226,17 +226,61 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
         ),
       ];
 
-      // 3. Ambil daftar barang yang seharusnya ada di zona sesi
+      // 3. Ambil daftar EPC barang yang seharusnya ada di zona sesi
       const expectedResult = await db.query(
         `SELECT t.epc
-         FROM items i
-         JOIN locations l ON i.location_id = l.id
-         JOIN tags t ON i.tag_id = t.id
-         WHERE l.zone_code = $1
-           AND i.status = 'IN_STOCK'
-           AND t.status = 'IN_STOCK'`,
+   FROM items i
+   JOIN locations l ON i.location_id = l.id
+   JOIN tags t ON i.tag_id = t.id
+   WHERE l.zone_code = $1
+     AND i.status = 'IN_STOCK'
+     AND t.status = 'IN_STOCK'`,
         [session.zone_code]
       );
+
+      // Ambil ringkasan stok sistem per produk berdasarkan zona
+const systemStockResult = await db.query(
+  `
+  SELECT
+    p.id AS product_id,
+    p.sku,
+    p.name AS product_name,
+    COUNT(i.id)::INT AS system_stock
+  FROM items i
+  JOIN products p ON i.product_id = p.id
+  JOIN locations l ON i.location_id = l.id
+  JOIN tags t ON i.tag_id = t.id
+  WHERE l.zone_code = $1
+    AND i.status = 'IN_STOCK'
+    AND t.status = 'IN_STOCK'
+  GROUP BY p.id, p.sku, p.name
+  ORDER BY p.sku ASC
+  `,
+  [session.zone_code]
+);
+
+// Tambahkan tepat di bawah systemStockResult
+const scannedStockResult = await db.query(
+  `
+  SELECT
+    p.id AS product_id,
+    p.sku,
+    p.name AS product_name,
+    COUNT(DISTINCT t.epc)::INT AS scanned_stock
+  FROM tags t
+  JOIN items i ON i.tag_id = t.id
+  JOIN products p ON i.product_id = p.id
+  JOIN locations l ON i.location_id = l.id
+  WHERE t.epc = ANY($1::text[])
+    AND l.zone_code = $2
+    AND i.status = 'IN_STOCK'
+    AND t.status = 'IN_STOCK'
+  GROUP BY p.id, p.sku, p.name
+  ORDER BY p.sku ASC
+  `,
+  [uniqueEpcs, session.zone_code]
+);
+  
 
       const expectedEpcs = new Set(
         expectedResult.rows.map((item) => item.epc)
@@ -244,39 +288,51 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
 
       // 4. Cari EPC hasil scan di database
       const actualResult = uniqueEpcs.length > 0
-        ? await db.query(
-            `SELECT t.epc, l.zone_code
-             FROM tags t
-             LEFT JOIN items i ON i.tag_id = t.id
-             LEFT JOIN locations l ON i.location_id = l.id
-             WHERE t.epc = ANY($1::text[])`,
-            [uniqueEpcs]
-          )
-        : { rows: [] };
-
+  ? await db.query(
+      `
+      SELECT
+        t.epc,
+        l.zone_code,
+        p.id AS product_id,
+        p.sku,
+        p.name AS product_name
+      FROM tags t
+      LEFT JOIN items i ON i.tag_id = t.id
+      LEFT JOIN products p ON i.product_id = p.id
+      LEFT JOIN locations l ON i.location_id = l.id
+      WHERE t.epc = ANY($1::text[])
+      `,
+      [uniqueEpcs]
+    )
+  : { rows: [] };
       const actualMap = new Map(
-        actualResult.rows.map((item) => [item.epc, item.zone_code])
-      );
+  actualResult.rows.map((item) => [item.epc, item.zone_code])
+);
 
-      // 5. Hitung hasil scan
+// 5. Hitung hasil scan
 let matchedCount = 0;
 let misplacedCount = 0;
 
 const discrepancies: Array<Record<string, unknown>> = [];
-
 const scannedEpcs = new Set(uniqueEpcs);
 
-// Periksa semua EPC yang terbaca scanner
 for (const epc of uniqueEpcs) {
   if (expectedEpcs.has(epc)) {
     matchedCount++;
   } else if (actualMap.has(epc)) {
     misplacedCount++;
 
+    const actualItem = actualResult.rows.find(
+      (item) => item.epc === epc
+    );
+
     discrepancies.push({
       epc,
       type: 'MISPLACED',
-      actual_zone: actualMap.get(epc),
+      product_id: actualItem?.product_id,
+      sku: actualItem?.sku,
+      product_name: actualItem?.product_name,
+      actual_zone: actualItem?.zone_code,
       expected_zone: session.zone_code,
     });
   } else {
@@ -288,31 +344,33 @@ for (const epc of uniqueEpcs) {
   }
 }
 
-// Periksa barang yang seharusnya ada tetapi tidak terbaca
-for (const epc of expectedEpcs) {
-  if (!scannedEpcs.has(epc)) {
-    discrepancies.push({
-      epc,
-      type: 'MISSING',
-      expected_zone: session.zone_code,
-    });
-  }
-}
+      // Periksa barang yang seharusnya ada tetapi tidak terbaca
+      for (const epc of expectedEpcs) {
+        if (!scannedEpcs.has(epc)) {
+          discrepancies.push({
+            epc,
+            type: 'MISSING',
+            expected_zone: session.zone_code,
+          });
+        }
+      }
 
-const missingCount = discrepancies.filter(
-  (item) => item.type === 'MISSING'
-).length;
+      const missingCount = discrepancies.filter(
+        (item) => item.type === 'MISSING'
+      ).length;
 
       // 6. Simpan hasil rekonsiliasi ke sesi yang sama
       const updateResult = await db.query(
         `UPDATE stocktake_sessions
-         SET total_scanned = $1,
-             matched_count = $2,
-             missing_count = $3,
-             misplaced_count = $4,
-             discrepancies = $5
-         WHERE id = $6
-         RETURNING *`,
+ SET total_scanned = $1,
+     matched_count = $2,
+     missing_count = $3,
+     misplaced_count = $4,
+     discrepancies = $5,
+     status = 'COMPLETED_PENDING_APPROVAL'
+ WHERE id = $6
+   AND status = 'IN_PROGRESS'
+ RETURNING *`,
         [
           uniqueEpcs.length,
           matchedCount,
@@ -333,10 +391,14 @@ const missingCount = discrepancies.filter(
       );
 
       return reply.send({
-        success: true,
-        message: 'Hasil scan RFID berhasil direkonsiliasi.',
-        data: updateResult.rows[0],
-      });
+  success: true,
+  message: 'Hasil scan RFID berhasil direkonsiliasi.',
+  data: {
+    ...updateResult.rows[0],
+    system_stock: systemStockResult.rows,
+    scanned_stock: scannedStockResult.rows,
+  },
+});
     } catch (error) {
       console.error('[STOCKTAKE] Gagal mengirim hasil scan:', error);
 
@@ -346,6 +408,7 @@ const missingCount = discrepancies.filter(
       });
     }
   });
+
 
 
   
@@ -359,18 +422,12 @@ const missingCount = discrepancies.filter(
       ],
     },
     async (request, reply) => {
-      const {
-        session_code,
-        product_id,
-        diff_qty,
-        from_rack,
-        to_rack,
-      } = request.body as {
+      const { session_code, adjustments } = request.body as {
         session_code: string;
-        product_id: string;
-        diff_qty: number;
-        from_rack?: string;
-        to_rack?: string;
+        adjustments: {
+          product_id: string;
+          diff_qty: number;
+        }[];
       };
 
       const user = request.user;
@@ -378,13 +435,26 @@ const missingCount = discrepancies.filter(
       // 1. Validasi input
       if (
         !session_code ||
-        !product_id ||
-        !Number.isInteger(diff_qty) ||
-        diff_qty === 0
+        !Array.isArray(adjustments) ||
+        adjustments.some(
+          (item) =>
+            !item.product_id ||
+            !Number.isInteger(item.diff_qty) ||
+            item.diff_qty === 0
+        )
       ) {
         return reply.code(400).send({
           success: false,
-          message: 'Data persetujuan atau jumlah selisih tidak valid.',
+          message: 'Data persetujuan atau penyesuaian tidak valid.',
+        });
+      }
+
+      const productIds = adjustments.map((item) => item.product_id);
+
+      if (new Set(productIds).size !== productIds.length) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Produk yang sama tidak boleh dikirim dua kali.',
         });
       }
 
@@ -407,9 +477,9 @@ const missingCount = discrepancies.filter(
       try {
         await client.query('BEGIN');
 
-        // 2. Periksa sesi opname
+        // 2. Periksa dan kunci sesi opname
         const sessionResult = await client.query(
-          `SELECT id, status
+          `SELECT id, status, zone_code
            FROM stocktake_sessions
            WHERE session_code = $1
            FOR UPDATE`,
@@ -425,7 +495,9 @@ const missingCount = discrepancies.filter(
           });
         }
 
-        if (sessionResult.rows[0].status !== 'IN_PROGRESS') {
+        const session = sessionResult.rows[0];
+
+        if (session.status !== 'COMPLETED_PENDING_APPROVAL') {
           await client.query('ROLLBACK');
 
           return reply.code(400).send({
@@ -434,65 +506,118 @@ const missingCount = discrepancies.filter(
           });
         }
 
-        // 3. Ambil informasi produk
-        const productResult = await client.query(
-          `SELECT id, sku
-           FROM products
-           WHERE id = $1`,
-          [product_id]
+        // 3. Cari lokasi rak berdasarkan zona sesi
+        const locationResult = await client.query(
+          `SELECT id, code
+           FROM locations
+           WHERE zone_code = $1
+             AND location_type = 'RACK'
+           LIMIT 1`,
+          [session.zone_code]
         );
 
-        if (productResult.rows.length === 0) {
+        if (locationResult.rows.length === 0) {
           await client.query('ROLLBACK');
 
           return reply.code(404).send({
             success: false,
-            message: 'Produk tidak ditemukan.',
+            message: 'Lokasi rak untuk zona opname tidak ditemukan.',
           });
         }
 
-        const product = productResult.rows[0];
+        const location = locationResult.rows[0];
+        const ledgerEntries = [];
 
-        // 4. Catat penyesuaian ke stock_movements
-        const txCode = `TX-OPN-${Date.now()}`;
+        // 4. Proses seluruh penyesuaian produk
+        for (let index = 0; index < adjustments.length; index++) {
+          const adjustment = adjustments[index];
 
-        const ledgerResult = await client.query(
-          `INSERT INTO stock_movements (
-            tx_code,
-            movement_type,
-            product_id,
-            sku,
-            from_location,
-            to_location,
-            qty_change,
-            reference_doc,
-            performed_by_name,
-            performed_by
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-          RETURNING *`,
-          [
-            txCode,
-            'STOCKTAKE_ADJUSTMENT',
-            product.id,
-            product.sku,
-            from_rack || 'Audit Opname Fisik',
-            to_rack || 'Koreksi Buku Besar',
-            diff_qty,
-            session_code,
-            user.full_name || user.username,
-            user.id,
-          ]
-        );
+          const productResult = await client.query(
+            `SELECT p.id, p.sku
+             FROM products p
+             WHERE p.id = $1
+               AND EXISTS (
+                 SELECT 1
+                 FROM items i
+                 JOIN locations l ON i.location_id = l.id
+                 WHERE i.product_id = p.id
+                   AND l.zone_code = $2
+                   AND i.status = 'IN_STOCK'
+               )`,
+            [adjustment.product_id, session.zone_code]
+          );
 
-        // 5. Perbarui status sesi opname
+          if (productResult.rows.length === 0) {
+            throw new Error(
+              `Produk ${adjustment.product_id} tidak ditemukan di zona opname.`
+            );
+          }
+
+          const product = productResult.rows[0];
+          const diffQty = adjustment.diff_qty;
+          const isIncrease = diffQty > 0;
+
+          const txCode = `TX-OPN-${Date.now()}-${index + 1}`;
+
+          const movementType = isIncrease
+            ? 'Stock Adjustment - Increase'
+            : 'Stock Adjustment - Decrease';
+
+          
+const ledgerResult = await client.query(
+  `INSERT INTO stock_movements (
+    tx_code,
+    movement_type,
+    product_id,
+    sku,
+    from_location,
+    to_location,
+    qty_change,
+    qty_label,
+    reference_doc,
+    performed_by_name,
+    performed_by,
+    from_location_id,
+    to_location_id
+  )
+  VALUES (
+    $1, $2, $3, $4, $5, $6,
+    $7, $8, $9, $10, $11, $12, $13
+  )
+  RETURNING *`,
+  [
+    txCode,
+    movementType,
+    product.id,
+    product.sku,
+    isIncrease
+      ? 'Penyesuaian stok'
+      : `Rak ${location.code}`,
+    isIncrease
+      ? `Rak ${location.code}`
+      : 'Penyesuaian stok',
+    diffQty,
+    `${Math.abs(diffQty)} Unit`,
+    session_code,
+    user.full_name || user.username,
+    user.id,
+    isIncrease ? null : location.id,
+    isIncrease ? location.id : null,
+  ]
+);
+
+
+          ledgerEntries.push(ledgerResult.rows[0]);
+        }
+
+        // 5. Perbarui status sesi setelah semua transaksi berhasil
         await client.query(
           `UPDATE stocktake_sessions
-           SET status = 'DISETUJUI',
+           SET status = 'APPROVED',
                approved_by = $1,
                approved_at = NOW()
            WHERE id = $2`,
-          [user.id, sessionResult.rows[0].id]
+          [user.id, session.id]
         );
 
         await client.query('COMMIT');
@@ -501,26 +626,37 @@ const missingCount = discrepancies.filter(
         publishRealtimeEvent('wms/stock/realtime', {
           event: 'STOCKTAKE_APPROVED',
           session_code,
-          ledgerEntry: ledgerResult.rows[0],
+          ledgerEntries,
         });
 
         return reply.send({
           success: true,
           message: 'Persetujuan stock opname berhasil.',
-          ledger: ledgerResult.rows[0],
+          total_adjustments: ledgerEntries.length,
+          ledger: ledgerEntries,
         });
+
       } catch (error) {
         await client.query('ROLLBACK');
 
-        console.error('[STOCKTAKE] Gagal menyetujui opname:', error);
+        console.error(
+          '[STOCKTAKE] Gagal menyetujui opname:',
+          error
+        );
 
         return reply.code(500).send({
           success: false,
           message: 'Gagal memproses persetujuan stock opname.',
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Terjadi kesalahan pada server.',
         });
+
       } finally {
         client.release();
       }
     }
   );
+
 }
