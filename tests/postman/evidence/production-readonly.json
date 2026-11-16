@@ -1,0 +1,211 @@
+{
+  "label": "production-readonly",
+  "startedAt": "2026-11-11T04:51:14.555Z",
+  "finishedAt": "2026-11-11T04:51:17.599Z",
+  "elapsedMs": 3044,
+  "stats": {
+    "iterations": {
+      "total": 1,
+      "pending": 0,
+      "failed": 0
+    },
+    "items": {
+      "total": 7,
+      "pending": 0,
+      "failed": 0
+    },
+    "scripts": {
+      "total": 20,
+      "pending": 0,
+      "failed": 0
+    },
+    "prerequests": {
+      "total": 7,
+      "pending": 0,
+      "failed": 0
+    },
+    "requests": {
+      "total": 7,
+      "pending": 0,
+      "failed": 0
+    },
+    "tests": {
+      "total": 7,
+      "pending": 0,
+      "failed": 0
+    },
+    "assertions": {
+      "total": 24,
+      "pending": 0,
+      "failed": 0
+    },
+    "testScripts": {
+      "total": 7,
+      "pending": 0,
+      "failed": 0
+    },
+    "prerequestScripts": {
+      "total": 13,
+      "pending": 0,
+      "failed": 0
+    }
+  },
+  "collectionItems": 7,
+  "guardPreflightRequests": 0,
+  "requests": [
+    {
+      "name": "HEALTH Production (bukan bukti database)",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 5,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Status OK",
+          "status": "PASS"
+        },
+        {
+          "name": "JSON object",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "READ daftar products",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 760,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "Array dan UUID",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "READ detail products",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 93,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID utuh",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "READ daftar grn",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 142,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "Array dan UUID",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "READ detail grn",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 313,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID utuh",
+          "status": "PASS"
+        },
+        {
+          "name": "Riwayat berupa array, boleh kosong",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "READ daftar tags",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 672,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "Array dan UUID",
+          "status": "PASS"
+        }
+      ]
+    },
+    {
+      "name": "READ detail tags",
+      "method": "GET",
+      "statusCode": 200,
+      "durationMs": 406,
+      "assertions": [
+        {
+          "name": "HTTP 200",
+          "status": "PASS"
+        },
+        {
+          "name": "Envelope",
+          "status": "PASS"
+        },
+        {
+          "name": "UUID utuh",
+          "status": "PASS"
+        },
+        {
+          "name": "EPC legacy boleh dibaca",
+          "status": "PASS"
+        },
+        {
+          "name": "Riwayat berupa array, boleh kosong",
+          "status": "PASS"
+        }
+      ]
+    }
+  ],
+  "failures": [],
+  "expectedFailure": false
+}

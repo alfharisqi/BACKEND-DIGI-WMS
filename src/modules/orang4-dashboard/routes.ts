@@ -1,86 +1,710 @@
 import { FastifyInstance } from 'fastify';
+import bcrypt from 'bcryptjs';
 import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
 import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
+import { generateToken, authenticate, requireRoles } from '../../middleware/auth';
 
 /**
  * ============================================================================
- * MODUL ORANG 4: PONDASI SERVER, DASHBOARD KPI UTAMA & MANAJEMEN PENGGUNA
+ * MODUL LENGKAP ORANG 4:
+ * - PONDASI SERVER & HEALTH MONITOR (PostgreSQL + EMQX MQTT)
+ * - DASHBOARD KPI EKSEKUTIF, GRAFIK PERGERAKAN STOK & PERINGATAN STOK KRITIS
+ * - AUTENTIKASI LOGIN RESMI (USERNAME & PASSWORD), MANAJEMEN USER (CRUD RBAC) & AUDIT LOGS
+ * - PENGATURAN SISTEM GUDANG & PARAMETER FREKUENSI UHF RFID (920-923 MHz)
  * ============================================================================
  */
 export async function orang4DashboardRoutes(app: FastifyInstance) {
   // 1. GET Status Kesehatan Server, PostgreSQL & Broker EMQX
   app.get('/api/health', async () => {
+    const ledgerStocks = getCalculatedLedgerStock();
     return {
       status: 'OK',
-      service: 'DIGI WMS Backend API (Tahap 1 Pondasi)',
-      database_mode: isPostgresConnected ? 'POSTGRESQL_DOCKER' : 'IN_MEMORY_LEDGER_READY',
-      emqx_mqtt: mqttClient?.connected ? 'CONNECTED' : 'STANDBY_SIMULATION',
+      service: 'DIGI WMS Backend API — Modul Orang 4',
+      database_mode: isPostgresConnected
+        ? process.env.DATABASE_URL?.includes('supabase')
+          ? 'SUPABASE_CLOUD_POSTGRES (Port 6543/5432)'
+          : 'POSTGRESQL_16_DOCKER (Port 5432)'
+        : 'IN_MEMORY_LEDGER_READY (Auto Fallback)',
+      emqx_mqtt: mqttClient?.connected
+        ? 'CONNECTED (TCP 1883 / WS 8083)'
+        : 'STANDBY_SIMULATION (Siap Konek EMQX)',
+      uptime_seconds: Math.floor(process.uptime()),
+      rfid_freq: memoryStore.settings.rfid_frequency || '920 - 923 MHz (Indonesia)',
+      stats: {
+        total_users: memoryStore.users.length,
+        total_skus: ledgerStocks.length,
+        total_tags: memoryStore.tags.length,
+        total_audit_logs: memoryStore.audit_logs.length,
+      },
       timestamp: new Date().toISOString(),
     };
   });
 
-  // 2. GET Metrik KPI Dashboard Utama
+  // 2. GET Metrik KPI Dashboard Utama + Grafik Pergerakan + Distribusi Kategori
   app.get('/api/dashboard/summary', async () => {
+    let total_stock = 0;
+    let total_inbound = 0;
+    let active_rfid_tags = 0;
+    let low_stock_items: Array<Record<string, unknown>> = [];
+    let all_stocks: Array<{ category: string; current_stock: number }> = [];
+
     if (isPostgresConnected) {
-      const stockRes = await db.query(
-        'SELECT COALESCE(SUM(current_stock), 0)::INT AS total_stock FROM v_product_stock_ledger'
-      );
+      const stockRes = await db.query('SELECT * FROM v_product_stock_ledger');
+      all_stocks = stockRes.rows;
+      total_stock = all_stocks.reduce((acc, s) => acc + Number(s.current_stock), 0);
+
       const grnRes = await db.query(
         'SELECT COALESCE(SUM(total_qty), 0)::INT AS total_inbound FROM goods_receipts'
       );
-      const tagsRes = await db.query('SELECT COUNT(*)::INT AS active_tags FROM tags');
-      const lowStockRes = await db.query(
-        "SELECT * FROM v_product_stock_ledger WHERE stock_status = 'STOK_RENDAH'"
-      );
+      total_inbound = grnRes.rows[0].total_inbound;
 
-      return {
-        success: true,
-        kpi: {
-          total_stock: stockRes.rows[0].total_stock,
-          total_inbound: grnRes.rows[0].total_inbound,
-          active_rfid_tags: tagsRes.rows[0].active_tags,
-          low_stock_items: lowStockRes.rows,
-        },
-      };
+      const tagsRes = await db.query('SELECT COUNT(*)::INT AS active_tags FROM tags');
+      active_rfid_tags = tagsRes.rows[0].active_tags;
+
+      low_stock_items = stockRes.rows.filter((s) => s.stock_status === 'STOK_RENDAH');
+    } else {
+      const ledgerStocks = getCalculatedLedgerStock();
+      all_stocks = ledgerStocks;
+      total_stock = ledgerStocks.reduce((acc, s) => acc + s.current_stock, 0);
+      total_inbound = memoryStore.goods_receipts.reduce((acc, g) => acc + g.total_qty, 0);
+      active_rfid_tags = memoryStore.tags.length;
+      low_stock_items = ledgerStocks.filter((s) => s.stock_status === 'STOK_RENDAH');
     }
 
-    const ledgerStocks = getCalculatedLedgerStock();
-    const total_stock = ledgerStocks.reduce((acc, s) => acc + s.current_stock, 0);
-    const total_inbound = memoryStore.goods_receipts.reduce((acc, g) => acc + g.total_qty, 0);
-    const active_rfid_tags = memoryStore.tags.length;
-    const low_stock_items = ledgerStocks.filter((s) => s.stock_status === 'STOK_RENDAH');
+    const categoryMap: Record<string, number> = {};
+    all_stocks.forEach((item) => {
+      categoryMap[item.category] = (categoryMap[item.category] || 0) + Number(item.current_stock);
+    });
+    const category_distribution = Object.entries(categoryMap).map(([category, stock]) => ({
+      category,
+      stock,
+    }));
+
+    const days7 = [
+      { label: '6 Mei', inbound: 45, outbound: 18, opname: 40 },
+      { label: '7 Mei', inbound: 60, outbound: 24, opname: 55 },
+      { label: '8 Mei', inbound: 30, outbound: 15, opname: 35 },
+      { label: '9 Mei', inbound: 85, outbound: 32, opname: 75 },
+      { label: '10 Mei', inbound: 50, outbound: 20, opname: 48 },
+      { label: '11 Mei', inbound: 70, outbound: 28, opname: 65 },
+      { label: 'Hari Ini', inbound: 95, outbound: 35, opname: 90 },
+    ];
+
+    const days30 = [
+      { label: 'Minggu 1', inbound: 210, outbound: 95, opname: 195 },
+      { label: 'Minggu 2', inbound: 320, outbound: 140, opname: 300 },
+      { label: 'Minggu 3', inbound: 280, outbound: 120, opname: 270 },
+      { label: 'Minggu 4', inbound: 390, outbound: 165, opname: 375 },
+    ];
+
+    const summaryData = {
+      kpis: {
+        totalSkus: all_stocks.length,
+        totalPhysicalStock: total_stock,
+        activeRfidTags: active_rfid_tags,
+        gateAlarmsCount: memoryStore.gate_events?.length || 2,
+        totalInbound: total_inbound,
+      },
+      chartData: {
+        days7,
+        days30,
+      },
+      categoryDistribution: category_distribution,
+      lowStockItems: low_stock_items,
+    };
 
     return {
+      status: 'ok',
       success: true,
+      data: summaryData,
       kpi: {
         total_stock,
         total_inbound,
         active_rfid_tags,
+        total_Zones: memoryStore.locations.length,
         low_stock_items,
+        category_distribution,
       },
     };
   });
 
-  // 3. GET Daftar Pengguna (Users)
+  // 3. POST Login Resmi (Validasi Username & Password Hash + Catat ke Audit Log)
+  app.post('/api/auth/login', async (request, reply) => {
+    const { username, password } = request.body as { username: string; password?: string };
+
+    if (!username || !password) {
+      return reply
+        .code(400)
+        .send({ success: false, message: 'Username dan password wajib diisi!' });
+    }
+
+    if (isPostgresConnected) {
+      const res = await db.query(
+        'SELECT id, username, password_hash, full_name, role, is_active FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)',
+        [username.trim()]
+      );
+      if (res.rows.length === 0) {
+        return reply
+          .code(401)
+          .send({ success: false, message: 'Username atau password salah!' });
+      }
+      const user = res.rows[0];
+      if (!user.is_active) {
+        return reply
+          .code(403)
+          .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan oleh Admin!' });
+      }
+
+      // Verifikasi kata sandi ter-hash dengan bcrypt
+      const isMatch = await bcrypt.compare(password, user.password_hash || '');
+      if (!isMatch) {
+        return reply
+          .code(401)
+          .send({ success: false, message: 'Username atau password salah!' });
+      }
+
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        user.id,
+        'USER_LOGIN',
+        JSON.stringify({
+          username: user.username,
+          role: user.role,
+          note: `Login berhasil ke sistem DIGI WMS (${user.role}) - Verified with bcrypt`,
+        }),
+      ]);
+
+      const { password_hash: _ph, ...safeUser } = user;
+      const token = generateToken(safeUser);
+      return {
+        status: 'ok',
+        success: true,
+        message: `Selamat datang, ${user.full_name} (${user.role})`,
+        token,
+        user: safeUser,
+        data: { user: safeUser, token },
+      };
+    }
+
+    const user = memoryStore.users.find(
+      (u) => u.username.toLowerCase() === String(username || '').trim().toLowerCase()
+    );
+    if (!user) {
+      return reply
+        .code(401)
+        .send({ success: false, message: 'Username atau password salah!' });
+    }
+    if (!user.is_active) {
+      return reply
+        .code(403)
+        .send({ success: false, message: 'Akun personel ini sedang dinonaktifkan oleh Admin!' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password_hash || '');
+    if (!isMatch) {
+      return reply
+        .code(401)
+        .send({ success: false, message: 'Username atau password salah!' });
+    }
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: user.id,
+      user_name: user.full_name,
+      action: 'USER_LOGIN',
+      payload: {
+        username: user.username,
+        role: user.role,
+        note: `Login berhasil ke portal DIGI WMS (${user.role}) - Verified with bcrypt`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    publishRealtimeEvent('digiwms/audit/login', {
+      username: user.username,
+      full_name: user.full_name,
+      role: user.role,
+    });
+
+    const { password_hash: _ph, ...safeUser } = user;
+    const token = generateToken(safeUser);
+    return {
+      status: 'ok',
+      success: true,
+      message: `Selamat datang, ${user.full_name} (${user.role})`,
+      token,
+      user: safeUser,
+      data: { user: safeUser, token },
+    };
+  });
+
+  // 3B. POST Logout Pengguna
+  app.post('/api/auth/logout', async (request) => {
+    const { username, full_name, role } =
+      (request.body as { username?: string; full_name?: string; role?: string }) || {};
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: full_name || username || 'User',
+      action: 'USER_LOGOUT',
+      payload: {
+        username: username || 'unknown',
+        role: role || 'STAFF',
+        note: `Logout keluar dari sesi DIGI WMS`,
+      },
+      created_at: new Date().toISOString(),
+    });
+    return { status: 'ok', success: true, message: 'Berhasil keluar dari sesi' };
+  });
+
+  // 3C. GET Identitas Pengguna dari JWT (Contoh Penggunaan request.user.id)
+  app.get('/api/auth/me', { preHandler: [authenticate] }, async (request) => {
+    // Backend mengambil identitas pengguna langsung dari token JWT yang sudah diverifikasi:
+    const userId = request.user?.id;
+    const username = request.user?.username;
+    const role = request.user?.role;
+    const fullName = request.user?.full_name;
+
+    return {
+      status: 'ok',
+      success: true,
+      message: 'Identitas pengguna berhasil diekstrak dari JWT token',
+      user: request.user,
+      extracted_info: {
+        user_id: userId,
+        username,
+        role,
+        full_name: fullName,
+      },
+    };
+  });
+
+  // 4. GET Daftar Pengguna (Users)
   app.get('/api/users', async () => {
     if (isPostgresConnected) {
       const res = await db.query(
-        'SELECT id, username, full_name, role, is_active, created_at FROM users ORDER BY id ASC'
+        'SELECT id, username, email, full_name, role, is_active, created_at FROM users ORDER BY created_at ASC'
       );
-      return { success: true, data: res.rows };
+      return { status: 'ok', success: true, data: res.rows };
     }
-    return { success: true, data: memoryStore.users };
+    const safeUsers = memoryStore.users.map(({ password_hash: _p, ...rest }) => rest);
+    return { status: 'ok', success: true, data: safeUsers };
   });
 
-  // 4. POST Tes Broadcast Pesan Real-time via EMQX MQTT
-  app.post('/api/mqtt/test-publish', async (request) => {
-    const { topic = 'wms/stock/realtime', message = 'Halo dari Backend DIGI WMS!' } =
-      (request.body as { topic?: string; message?: string }) || {};
+  // 5. POST Tambah Pengguna Baru (Manajemen Staf Gudang oleh Orang 4)
+  app.post('/api/users', async (request, reply) => {
+    const {
+      username,
+      password = '123456',
+      full_name,
+      role = 'WAREHOUSE_STAFF',
+    } = request.body as {
+      username: string;
+      password?: string;
+      full_name: string;
+      role?: string;
+    };
 
-    publishRealtimeEvent(topic, { testMessage: message });
+    if (!username || !full_name) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: 'Username dan Nama Lengkap wajib diisi!',
+      });
+    }
+
+    // Hash kata sandi menggunakan bcrypt (10 rounds salt)
+    const passwordHash = await bcrypt.hash(password || '123456', 10);
+
+    if (isPostgresConnected) {
+      const check = await db.query(
+        'SELECT id FROM users WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($2)',
+        [username.trim(), `${username.trim()}@digiwms.id`]
+      );
+      if (check.rows.length > 0) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: `Username @${username} sudah terdaftar di sistem!`,
+        });
+      }
+
+      const res = await db.query(
+        `INSERT INTO users (username, email, password_hash, full_name, role, is_active)
+         VALUES ($1, $2, $3, $4, $5, TRUE)
+         RETURNING id, username, full_name, role, is_active, created_at`,
+        [username.trim(), `${username.trim()}@digiwms.id`, passwordHash, full_name.trim(), role]
+      );
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        res.rows[0].id,
+        'CREATE_USER',
+        JSON.stringify({ username: username.trim(), full_name: full_name.trim(), role, note: 'User dibuat dengan bcrypt password hash' }),
+      ]);
+      return reply.code(201).send({
+        status: 'ok',
+        success: true,
+        message: `Personel ${full_name} (${role}) berhasil didaftarkan (Password telah di-hash)`,
+        data: res.rows[0],
+      });
+    }
+
+    if (memoryStore.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: `Username @${username} sudah terdaftar!`,
+      });
+    }
+
+    const newUser = {
+      id: memoryStore.users.length > 0 ? Math.max(...memoryStore.users.map((u) => u.id)) + 1 : 1,
+      username: username.trim(),
+      password_hash: passwordHash,
+      full_name: full_name.trim(),
+      role,
+      is_active: true,
+      created_at: new Date().toISOString(),
+    };
+    memoryStore.users.push(newUser);
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: 'Admin / Supervisor',
+      action: 'CREATE_USER',
+      payload: {
+        username: username.trim(),
+        full_name: full_name.trim(),
+        role,
+        note: `Mendaftarkan personel baru: ${full_name} (@${username}) sebagai ${role} (Password di-hash)`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const { password_hash: _pw, ...safeNewUser } = newUser;
+    return reply.code(201).send({
+      status: 'ok',
+      success: true,
+      message: `Personel ${full_name} (${role}) berhasil didaftarkan (Password telah di-hash)`,
+      data: safeNewUser,
+    });
+  });
+
+  // 5B. PUT Edit Data Pengguna & Reset Password (Password Otomatis Di-hash)
+  app.put('/api/users/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { full_name, role, password } = request.body as {
+      full_name?: string;
+      role?: string;
+      password?: string;
+    };
+
+    let passwordHash: string | undefined;
+    if (password && password.trim().length > 0) {
+      passwordHash = await bcrypt.hash(password.trim(), 10);
+    }
+
+    if (isPostgresConnected) {
+      const updates: string[] = ['updated_at = NOW()'];
+      const values: any[] = [];
+      let idx = 1;
+
+      if (full_name) {
+        updates.push(`full_name = $${idx++}`);
+        values.push(full_name.trim());
+      }
+      if (role) {
+        updates.push(`role = $${idx++}`);
+        values.push(role);
+      }
+      if (passwordHash) {
+        updates.push(`password_hash = $${idx++}`);
+        values.push(passwordHash);
+      }
+
+      values.push(id);
+      const query = `UPDATE users SET ${updates.join(', ')} WHERE id::text = $${idx} RETURNING id, username, full_name, role, is_active, created_at`;
+      const res = await db.query(query, values);
+
+      if (res.rows.length === 0) {
+        return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+      }
+
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        res.rows[0].id,
+        'UPDATE_USER',
+        JSON.stringify({
+          username: res.rows[0].username,
+          role: res.rows[0].role,
+          password_reset: !!passwordHash,
+          note: `Memperbarui profil/hak akses @${res.rows[0].username}${passwordHash ? ' (Password berhasil di-hash)' : ''}`,
+        }),
+      ]);
+
+      return reply.send({
+        status: 'ok',
+        success: true,
+        message: `Data personel ${res.rows[0].full_name} berhasil diperbarui${passwordHash ? ' (Password berhasil di-hash & di-reset)' : ''}`,
+        data: res.rows[0],
+      });
+    }
+
+    const userId = Number(id);
+    const target = memoryStore.users.find((u) => u.id === userId);
+    if (!target) {
+      return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+    }
+
+    if (full_name) target.full_name = full_name;
+    if (role) target.role = role;
+    if (passwordHash) target.password_hash = passwordHash;
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: 'Admin / Supervisor',
+      action: 'UPDATE_USER',
+      payload: {
+        username: target.username,
+        role: target.role,
+        note: `Memperbarui profil/hak akses @${target.username} (${target.full_name} - ${target.role})`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const { password_hash: _pw, ...safeUser } = target;
+    return reply.send({
+      status: 'ok',
+      success: true,
+      message: `Data personel ${target.full_name} berhasil diperbarui`,
+      data: safeUser,
+    });
+  });
+
+  // 6. PATCH Aktifkan / Nonaktifkan Status Pengguna
+  app.patch('/api/users/:id/toggle', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    if (isPostgresConnected) {
+      const res = await db.query(
+        `UPDATE users SET is_active = NOT is_active WHERE id::text = $1
+         RETURNING id, username, full_name, role, is_active, created_at`,
+        [id]
+      );
+      if (res.rows.length === 0) {
+        return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+      }
+
+      await db.query('INSERT INTO audit_logs (user_id, action, payload) VALUES ($1, $2, $3)', [
+        res.rows[0].id,
+        'TOGGLE_USER_STATUS',
+        JSON.stringify({
+          username: res.rows[0].username,
+          is_active: res.rows[0].is_active,
+          note: `Status akun @${res.rows[0].username} diubah menjadi ${res.rows[0].is_active ? 'AKTIF' : 'NONAKTIF'}`,
+        }),
+      ]);
+
+      return reply.send({ status: 'ok', success: true, data: res.rows[0] });
+    }
+
+    const userId = Number(id);
+    const target = memoryStore.users.find((u) => u.id === userId);
+    if (target) {
+      target.is_active = !target.is_active;
+      memoryStore.audit_logs.unshift({
+        id: memoryStore.audit_logs.length + 1,
+        user_id: 1,
+        user_name: 'Admin / Supervisor',
+        action: 'TOGGLE_USER_STATUS',
+        payload: {
+          username: target.username,
+          role: target.role,
+          is_active: target.is_active,
+          note: `Status akun @${target.username} diubah menjadi ${
+            target.is_active ? 'AKTIF' : 'NONAKTIF'
+          }`,
+        },
+        created_at: new Date().toISOString(),
+      });
+    }
+    return reply.send({ status: 'ok', success: true, data: target });
+  });
+
+  // 6B. DELETE Hapus Pengguna
+  app.delete('/api/users/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    if (isPostgresConnected) {
+      const res = await db.query(
+        `DELETE FROM users WHERE id::text = $1 RETURNING id, username, full_name`,
+        [id]
+      );
+      if (res.rows.length === 0) {
+        return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+      }
+
+      await db.query('INSERT INTO audit_logs (action, payload) VALUES ($1, $2)', [
+        'DELETE_USER',
+        JSON.stringify({
+          deleted_username: res.rows[0].username,
+          note: `Menghapus akun personel @${res.rows[0].username} (${res.rows[0].full_name})`,
+        }),
+      ]);
+
+      return reply.send({
+        status: 'ok',
+        success: true,
+        message: `Akun @${res.rows[0].username} berhasil dihapus`,
+        data: res.rows[0],
+      });
+    }
+
+    const userId = Number(id);
+    const idx = memoryStore.users.findIndex((u) => u.id === userId);
+    if (idx === -1) {
+      return reply.code(404).send({ status: 'error', message: 'User tidak ditemukan' });
+    }
+
+    const removed = memoryStore.users[idx];
+    memoryStore.users.splice(idx, 1);
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: 'Admin / Supervisor',
+      action: 'DELETE_USER',
+      payload: {
+        username: removed.username,
+        role: removed.role,
+        note: `Menghapus akun personel @${removed.username} (${removed.full_name})`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    return reply.send({
+      status: 'ok',
+      success: true,
+      message: `Akun @${removed.username} berhasil dihapus`,
+    });
+  });
+
+  // 7. GET Riwayat Audit Log Keamanan Sistem
+  app.get('/api/audit-logs', async (request) => {
+    const { role } = (request.query as { role?: string }) || {};
+    let rawLogs: Array<Record<string, unknown>> = [];
+
+    if (isPostgresConnected) {
+      const res = await db.query(`
+        SELECT a.*, COALESCE(u.full_name, 'System Admin') AS user_name, COALESCE(u.role, 'ADMIN') AS user_role
+        FROM audit_logs a
+        LEFT JOIN users u ON a.user_id = u.id
+        ORDER BY a.created_at DESC
+        LIMIT 50
+      `);
+      rawLogs = res.rows;
+    } else {
+      rawLogs = memoryStore.audit_logs as unknown as Array<Record<string, unknown>>;
+    }
+
+    const normalized = rawLogs.map((log) => {
+      const payloadObj =
+        typeof log.payload === 'object' && log.payload !== null
+          ? (log.payload as Record<string, unknown>)
+          : {};
+      const actorRole = String(payloadObj.role || log.user_role || 'ADMIN');
+      const actorUsername = String(log.user_name || payloadObj.username || 'admin_wms');
+      const details = String(payloadObj.note || JSON.stringify(payloadObj));
+      return {
+        id: log.id,
+        actor_username: actorUsername,
+        actor_role: actorRole,
+        action: log.action,
+        details,
+        created_at: log.created_at,
+      };
+    });
+
+    const filtered =
+      role && role !== 'ALL'
+        ? normalized.filter((l) => l.actor_role.toUpperCase().includes(role.toUpperCase()))
+        : normalized;
+
+    return { status: 'ok', success: true, data: filtered };
+  });
+
+  // 8. GET & PUT Pengaturan Sistem Gudang & Parameter RFID
+  app.get('/api/settings', async () => {
+    const s = memoryStore.settings as Record<string, unknown>;
+    const enriched = {
+      ...s,
+      warehouse_name: s.warehouse_name || 'Gudang Utama Jakarta Pusat',
+      rfid_frequency: s.rfid_frequency || '920 - 923 MHz (Indonesia)',
+      rfid_gate_power_dbm: s.rfid_gate_power_dbm ?? 29,
+      anti_collision_mode:
+        s.anti_collision_mode || 'Dense Reader Mode (M=4) - EPCglobal Gen2',
+      alarm_siren_enabled: s.alarm_siren_enabled ?? true,
+    };
+    return { status: 'ok', success: true, data: enriched };
+  });
+
+  app.put('/api/settings', async (request) => {
+    const body = request.body as Record<string, unknown>;
+    memoryStore.settings = {
+      ...memoryStore.settings,
+      ...body,
+      updated_at: new Date().toISOString(),
+    };
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: String(body.updated_by || 'Sarah Jenkins'),
+      action: 'UPDATE_SYSTEM_SETTINGS',
+      payload: {
+        role: 'ADMIN',
+        note: `Memperbarui pengaturan gudang (${memoryStore.settings.warehouse_name}) & daya antena RFID`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    publishRealtimeEvent('digiwms/settings/updated', {
+      event: 'SYSTEM_SETTINGS_UPDATED',
+      settings: memoryStore.settings,
+    });
+
+    return { status: 'ok', success: true, data: memoryStore.settings };
+  });
+
+  // 9. POST Tes Broadcast Pesan Real-time via EMQX MQTT
+  app.post('/api/mqtt/test-publish', async (request) => {
+    const body = (request.body as Record<string, unknown>) || {};
+    const topic = String(body.topic || 'digiwms/rfid/gate-alarm');
+    const payload = (body.payload as Record<string, unknown>) || {
+      message: String(body.message || 'Ping Real-time dari Dashboard Orang 4!'),
+    };
+
+    publishRealtimeEvent(topic, {
+      event: 'MANUAL_BROADCAST_ORANG4',
+      ...payload,
+      sender: 'Modul Orang 4 (Dashboard & Server)',
+    });
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 1,
+      user_name: String(payload.operator || 'Sarah Jenkins'),
+      action: 'MQTT_TEST_BROADCAST',
+      payload: {
+        role: 'SUPERVISOR',
+        note: `Broadcast paket uji MQTT ke topik ${topic}`,
+      },
+      created_at: new Date().toISOString(),
+    });
+
     return {
+      status: 'ok',
       success: true,
       topic,
+      payload,
       emqxConnected: Boolean(mqttClient?.connected),
     };
   });

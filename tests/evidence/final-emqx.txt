@@ -1,0 +1,16 @@
+
+> digiwms-backend@1.0.0 test:orang1:emqx
+> node --import tsx --test tests/emqx-qa.test.ts
+
+[EMQX MQTT] Terhubung ke broker mqtt://127.0.0.1:1883 sebagai orang1_qa_publisher_84323f
+[EMQX MQTT] Aktif mendengarkan topik: wms/opname/+/scan & wms/gate/+/read
+QA topic only: wms/qa/orang1/mqtt-test/29e0f927-5e0f-428c-86dd-5adea8b50108; synthetic publishes=1; TCP and WebSocket receive=PASS; no RFID/business event
+✔ Real EMQX: one approved QA publish reaches isolated TCP and WebSocket observers (162.6707ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1602.105

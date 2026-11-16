@@ -18,6 +18,14 @@ async function bootstrap() {
   // 1. Aktifkan CORS agar Frontend Web & Handheld App bisa mengakses API
   await app.register(cors, { origin: true });
 
+  // Root & Favicon handler agar tidak muncul 404 saat diakses langsung dari browser
+  app.get('/', async () => ({
+    status: 'OK',
+    service: 'DIGI WMS Backend API Server',
+    docs: '/api/health',
+  }));
+  app.get('/favicon.ico', async (_req, reply) => reply.code(204).send());
+
   // 2. Daftarkan 4 Modul Tim (Vertical Slicing)
   await app.register(orang1InboundRoutes);   // Orang 1: Master SKU, Tagging & Inbound GRN
   await app.register(orang2InventoryRoutes); // Orang 2: Rak, Putaway & Stock Movement Ledger
