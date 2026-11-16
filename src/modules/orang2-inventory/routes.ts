@@ -44,10 +44,10 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
   const getLedgerHandler = async () => {
     if (isPostgresConnected) {
       const res = await db.query(`
-        SELECT sm.*, p.sku, p.name AS product_name, u.full_name AS operator_name
+        SELECT sm.*, p.sku, p.name AS product_name, COALESCE(u.full_name, sm.performed_by_name, 'Staf Gudang') AS operator_name
         FROM stock_movements sm
         JOIN products p ON sm.product_id = p.id
-        LEFT JOIN users u ON sm.operator_id = u.id
+        LEFT JOIN users u ON sm.performed_by = u.id
         ORDER BY sm.created_at DESC
         LIMIT 100
       `);
