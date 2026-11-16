@@ -1,14 +1,16 @@
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
+import dns from 'node:dns';
 
+dns.setDefaultResultOrder('ipv4first');
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const db = new Pool({
   connectionString:
     process.env.DATABASE_URL ||
-    'postgresql://digiwms:digiwms_pass@localhost:5432/digiwms_db',
+    'postgresql://digiwms:digiwms_pass@localhost:6543/digiwms_db',
   max: 15,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
