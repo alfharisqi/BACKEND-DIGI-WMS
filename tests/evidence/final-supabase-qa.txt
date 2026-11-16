@@ -1,0 +1,36 @@
+
+> digiwms-backend@1.0.0 test:orang1:supabase
+> node --import tsx --test tests/supabase-contract.test.ts
+
+▶ Supabase UUID contract / exact Production status constraints
+  ✔ Stock preserves source projection despite incomplete ledger without product UUID (29.5195ms)
+  ✔ Positive stored stock prevents deletion even without item/ledger relations (2.853ms)
+  ✔ SKU create/update/delete persists native fields and UUID (20.7932ms)
+  ✔ Tag type mapping writes Supabase label and item remains ENCODED before putaway (76.1861ms)
+  ✔ Legacy EPC is readable unchanged and rejected for new registration (4.2069ms)
+  ✔ GRN verify records verified_at and audit, keeps RFID waiting (35.0298ms)
+  ✔ GRN calendar date remains YYYY-MM-DD in create/update/detail/list without timezone shift (13.992ms)
+  ✔ Cancel/deactivate persist only when schema supports them; exact Production fails clearly without writes (28.6319ms)
+  ✔ Ledger tag_id and item transaction status prevent reassignment/deactivation (16.1613ms)
+  ✔ Unassigned tag transition creates linked ENCODED item using UUID defaults (7.0584ms)
+✔ Supabase UUID contract / exact Production status constraints (416.8347ms)
+▶ Supabase UUID contract / QA capability statuses
+  ✔ Stock preserves source projection despite incomplete ledger without product UUID (8.8539ms)
+  ✔ Positive stored stock prevents deletion even without item/ledger relations (2.1239ms)
+  ✔ SKU create/update/delete persists native fields and UUID (19.7636ms)
+  ✔ Tag type mapping writes Supabase label and item remains ENCODED before putaway (76.7387ms)
+  ✔ Legacy EPC is readable unchanged and rejected for new registration (4.4564ms)
+  ✔ GRN verify records verified_at and audit, keeps RFID waiting (10.7118ms)
+  ✔ GRN calendar date remains YYYY-MM-DD in create/update/detail/list without timezone shift (6.915ms)
+  ✔ Cancel/deactivate persist only when schema supports them; exact Production fails clearly without writes (23.0237ms)
+  ✔ Ledger tag_id and item transaction status prevent reassignment/deactivation (20.0187ms)
+  ✔ Unassigned tag transition creates linked ENCODED item using UUID defaults (6.1896ms)
+✔ Supabase UUID contract / QA capability statuses (349.3355ms)
+ℹ tests 20
+ℹ suites 2
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1618.2283

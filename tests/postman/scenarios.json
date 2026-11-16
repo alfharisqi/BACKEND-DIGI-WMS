@@ -1,0 +1,534 @@
+[
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.00 — Mulai run QA",
+    "method": "GET",
+    "url": "/api/health",
+    "expected": "200"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.01 — CREATE produk tanpa relasi",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "201"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.02 — CREATE produk untuk relasi",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "201"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.03 — CREATE produk reassignment",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "201"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.04 — READ daftar produk",
+    "method": "GET",
+    "url": "/api/products",
+    "expected": "200"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.05 — READ detail produk",
+    "method": "GET",
+    "url": "/api/products/{{productId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.06 — UPDATE produk",
+    "method": "PUT",
+    "url": "/api/products/{{productId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.07 — READ update persisted",
+    "method": "GET",
+    "url": "/api/products/{{productId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — SKU kosong",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "400"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — Nama kosong",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "400"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — Harga negatif",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "400"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — Minimum stok negatif",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "400"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — SKU duplikat",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "409"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — UUID tidak ditemukan",
+    "method": "GET",
+    "url": "/api/products/{{missingId}}",
+    "expected": "404"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.N — Format ID salah",
+    "method": "GET",
+    "url": "/api/products/bukan-id",
+    "expected": "400"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.08 — DELETE hanya produk QA tanpa relasi",
+    "method": "DELETE",
+    "url": "/api/products/{{productId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "01 — MASTER SKU / PRODUCTS",
+    "name": "01.09 — GET setelah DELETE",
+    "method": "GET",
+    "url": "/api/products/{{productId}}",
+    "expected": "404"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.01 — CREATE GRN verifikasi",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "201"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.02 — CREATE GRN pembatalan terpisah",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "201"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.03 — READ daftar GRN",
+    "method": "GET",
+    "url": "/api/inbound/grn",
+    "expected": "200"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.04 — READ detail GRN",
+    "method": "GET",
+    "url": "/api/inbound/grn/{{grnId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.05 — UPDATE pending GRN",
+    "method": "PUT",
+    "url": "/api/inbound/grn/{{grnId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.06 — READ GRN updated",
+    "method": "GET",
+    "url": "/api/inbound/grn/{{grnId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.07 — VERIFY GRN",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{grnId}}/verify",
+    "expected": "200"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Verifikasi ulang",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{grnId}}/verify",
+    "expected": "409"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Edit GRN selesai",
+    "method": "PUT",
+    "url": "/api/inbound/grn/{{grnId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Cancel GRN selesai ditolak",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{grnId}}/cancel",
+    "expected": "409"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Pembatalan wajib alasan",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{grnIdCancel}}/cancel",
+    "expected": "400"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.08 — CANCEL atau penolakan constraint",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{grnIdCancel}}/cancel",
+    "expected": "(V('supportsExtendedStatus')==='true'?200:409)"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Pembatalan ulang ditolak",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{grnIdCancel}}/cancel",
+    "expected": "409"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — GRN berdampak stok fixture QA",
+    "method": "PATCH",
+    "url": "/api/inbound/grn/{{fixtureGrnId}}/cancel",
+    "expected": "409"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Supplier kosong",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "400"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Qty nol",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "400"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Qty negatif",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "400"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Qty pecahan",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "400"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — Tanggal invalid",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "400"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — PO duplikat",
+    "method": "POST",
+    "url": "/api/inbound/grn",
+    "expected": "409"
+  },
+  {
+    "folder": "02 — INBOUND GRN",
+    "name": "02.N — GRN tidak ditemukan",
+    "method": "GET",
+    "url": "/api/inbound/grn/{{missingId}}",
+    "expected": "404"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.01 — ENCODE label biasa dan item GRN",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "201"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.02 — ENCODE ON_METAL untuk reassignment",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "201"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.03 — ENCODE HARD_TAG untuk deactivate",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "201"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.04 — READ daftar RFID termasuk legacy QA",
+    "method": "GET",
+    "url": "/api/tags",
+    "expected": "200"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.05 — READ detail RFID",
+    "method": "GET",
+    "url": "/api/tags/{{tagId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.06 — UPDATE tipe RFID",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.07 — REASSIGN tag tanpa transaksi",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagIdReassign}}",
+    "expected": "200"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.08 — READ reassignment persisted",
+    "method": "GET",
+    "url": "/api/tags/{{tagIdReassign}}",
+    "expected": "200"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — EPC immutable",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Transisi IN_STOCK ilegal",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Reassign tag GRN ditolak",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Reassign tag transaksi fixture QA ditolak",
+    "method": "PATCH",
+    "url": "/api/tags/{{fixtureTagId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Deactivate tag transaksi ditolak",
+    "method": "PATCH",
+    "url": "/api/tags/{{fixtureTagId}}/deactivate",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Reassign ENCODED dengan ledger ditolak",
+    "method": "PATCH",
+    "url": "/api/tags/{{fixtureTransactionTagId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Deactivate ENCODED dengan ledger ditolak",
+    "method": "PATCH",
+    "url": "/api/tags/{{fixtureTransactionTagId}}/deactivate",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Deactivate wajib alasan",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagIdDeactivate}}/deactivate",
+    "expected": "400"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.09 — DEACTIVATE atau penolakan constraint",
+    "method": "PATCH",
+    "url": "/api/tags/{{tagIdDeactivate}}/deactivate",
+    "expected": "(V('supportsExtendedStatus')==='true'?200:409)"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — EPC tetap tidak boleh digunakan ulang",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — EPC pendek",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "400"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — EPC lebih 96 bit",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "400"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — EPC non-hex",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "400"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — EPC duplikat",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Produk tidak ditemukan",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "404"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Type invalid",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "400"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Hardware belum didukung",
+    "method": "POST",
+    "url": "/api/tags/encode",
+    "expected": "409"
+  },
+  {
+    "folder": "03 — RFID TAGGING / ENCODING",
+    "name": "03.N — Tag tidak ditemukan",
+    "method": "GET",
+    "url": "/api/tags/{{missingId}}",
+    "expected": "404"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.01 — Audit CREATE UPDATE VERIFY GRN",
+    "method": "GET",
+    "url": "/api/inbound/grn/{{grnId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.02 — Audit CANCEL dan data tidak dihapus",
+    "method": "GET",
+    "url": "/api/inbound/grn/{{grnIdCancel}}",
+    "expected": "200"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.03 — Audit ENCODE UPDATE RFID",
+    "method": "GET",
+    "url": "/api/tags/{{tagId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.04 — Audit DEACTIVATE dan retensi EPC item",
+    "method": "GET",
+    "url": "/api/tags/{{tagIdDeactivate}}",
+    "expected": "200"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.05 — DELETE produk berelasi ditolak",
+    "method": "DELETE",
+    "url": "/api/products/{{productIdLinked}}",
+    "expected": "409"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.06 — READ produk berelasi tetap ada",
+    "method": "GET",
+    "url": "/api/products/{{productIdLinked}}",
+    "expected": "200"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.07 — DELETE fixture stok dan ledger ditolak",
+    "method": "DELETE",
+    "url": "/api/products/{{fixtureProductId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.08 — READ fixture stok tetap",
+    "method": "GET",
+    "url": "/api/products/{{fixtureProductId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.09 — DELETE produk hanya relasi ledger ditolak",
+    "method": "DELETE",
+    "url": "/api/products/{{fixtureLedgerProductId}}",
+    "expected": "409"
+  },
+  {
+    "folder": "04 — AUDIT TRAIL & DATA INTEGRITY",
+    "name": "04.10 — READ produk ledger tanpa stok tetap ada",
+    "method": "GET",
+    "url": "/api/products/{{fixtureLedgerProductId}}",
+    "expected": "200"
+  },
+  {
+    "folder": "05 — HEALTH CHECK & NEGATIVE TESTS",
+    "name": "05.01 — HEALTH QA",
+    "method": "GET",
+    "url": "/api/health",
+    "expected": "200"
+  },
+  {
+    "folder": "05 — HEALTH CHECK & NEGATIVE TESTS",
+    "name": "05.02 — JSON malformed",
+    "method": "POST",
+    "url": "/api/products",
+    "expected": "400"
+  }
+]

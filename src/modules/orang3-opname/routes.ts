@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { db, isPostgresConnected, memoryStore } from '../../config/db';
+import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
 import { publishRealtimeEvent } from '../../config/mqtt';
 import { authenticate, requireRoles } from '../../middleware/auth';
 
@@ -163,27 +163,27 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
   app.get('/api/stocktake/sessions', async () => {
     if (isPostgresConnected) {
       const res = await db.query('SELECT * FROM stocktake_sessions ORDER BY created_at DESC');
-      return { success: true, data: res.rows };
+      return { status: 'ok', success: true, data: res.rows };
     }
-    return { success: true, data: memoryStore.stocktake_sessions };
+    return { status: 'ok', success: true, data: memoryStore.stocktake_sessions };
   });
 
-
-  // 2. POST Mengirim Hasil Scan RFID ke Sesi Stock Opname
-  app.post('/api/stocktake/scan-submit', async (request, reply) => {
-    try {
-      const { session_id, scanned_epcs } = request.body as {
-        session_id: string;
-        scanned_epcs: string[];
-      };
+// 2. POST Mengirim Hasil Scan RFID ke Sesi Stock Opname
+app.post('/api/stocktake/scan-submit', async (request, reply) => {
+  try {
+    const { session_id, scanned_epcs } = request.body as {
+      session_id: string;
+      scanned_epcs: string[];
+    };
 
       // Validasi input
-      if (!session_id || !Array.isArray(scanned_epcs)) {
-        return reply.code(400).send({
-          success: false,
-          message: 'ID sesi dan daftar EPC wajib diisi.',
-        });
-      }
+if (!session_id || !Array.isArray(scanned_epcs)) {
+  return reply.code(400).send({
+    success: false,
+    message: 'ID sesi dan daftar EPC wajib diisi.',
+  });
+}
+
 
       if (!isPostgresConnected) {
         return reply.code(503).send({
@@ -636,7 +636,7 @@ const ledgerResult = await client.query(
           ledger: ledgerEntries,
         });
 
-      } catch (error) {
+              } catch (error) {
         await client.query('ROLLBACK');
 
         console.error(
@@ -652,11 +652,9 @@ const ledgerResult = await client.query(
               ? error.message
               : 'Terjadi kesalahan pada server.',
         });
-
       } finally {
         client.release();
       }
     }
   );
-
 }

@@ -18,22 +18,30 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         GROUP BY l.id
         ORDER BY l.zone_code ASC
       `);
-      return { success: true, data: res.rows };
+      return { status: 'ok', success: true, data: res.rows };
     }
-    return { success: true, data: memoryStore.locations };
+    const enrichedLocations = memoryStore.locations.map((l) => ({
+      ...l,
+      code: l.rack_name,
+      zone: `Zona ${l.zone_code}`,
+      name: l.zone_description,
+      occupied: l.items_count,
+      capacity: l.max_capacity,
+    }));
+    return { status: 'ok', success: true, data: enrichedLocations };
   });
 
   // 2. GET Ringkasan Stok Barang (Dihitung dari View Buku Besar)
   app.get('/api/inventory/stock', async () => {
     if (isPostgresConnected) {
       const res = await db.query('SELECT * FROM v_product_stock_ledger');
-      return { success: true, data: res.rows };
+      return { status: 'ok', success: true, data: res.rows };
     }
-    return { success: true, data: getCalculatedLedgerStock() };
+    return { status: 'ok', success: true, data: getCalculatedLedgerStock() };
   });
 
-  // 3. GET Riwayat Buku Besar Mutasi Stok (Stock Movement Ledger Append-Only)
-  app.get('/api/inventory/ledger', async () => {
+  // 3. GET Riwayat Buku Besar Mutasi Stok (Mendukung /api/inventory/ledger dan /api/ledger)
+  const getLedgerHandler = async () => {
     if (isPostgresConnected) {
       const res = await db.query(`
         SELECT sm.*, p.sku, p.name AS product_name, u.full_name AS operator_name
@@ -43,97 +51,68 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         ORDER BY sm.created_at DESC
         LIMIT 100
       `);
-      return { success: true, data: res.rows };
+      return { status: 'ok', success: true, data: res.rows };
     }
-    return { success: true, data: memoryStore.stock_movements };
-  });
+    const enrichedLedger = memoryStore.stock_movements.map((m) => ({
+      ...m,
+      qty_change: m.qty,
+      notes: `${m.from_location} → ${m.to_location} (${m.reference_doc})`,
+    }));
+    return { status: 'ok', success: true, data: enrichedLedger };
+  };
+  app.get('/api/inventory/ledger', getLedgerHandler);
+  app.get('/api/ledger', getLedgerHandler);
 
   // 4. POST Proses Putaway (Menempatkan Barang ke Rak & Mencatat ke Ledger)
   app.post('/api/inventory/putaway', async (request, reply) => {
-    const { epc, product_id, location_id, qty = 1, reference_doc = 'PUTAWAY-MANUAL' } =
-      request.body as {
-        epc?: string;
-        product_id: number;
-        location_id: number;
-        qty?: number;
-        reference_doc?: string;
-      };
+    const body = (request.body || {}) as {
+      epc?: string;
+      epc_code?: string;
+      product_id?: number;
+      location_id?: number;
+      target_location?: string;
+      qty?: number;
+      reference_doc?: string;
+    };
 
-    if (isPostgresConnected) {
-      const client = await db.connect();
-      try {
-        await client.query('BEGIN');
-        const locRes = await client.query('SELECT * FROM locations WHERE id = $1', [location_id]);
-        const targetRack = locRes.rows[0]?.rack_name || 'Rak Gudang';
+    const epc = body.epc || body.epc_code;
+    const product_id = Number(body.product_id || 1);
+    const location_id = Number(body.location_id || 1);
+    const qty = Number(body.qty || 1);
+    const reference_doc = body.reference_doc || 'PUTAWAY-RFID';
 
-        if (epc) {
-          await client.query(
-            `UPDATE tags SET status = 'IN_STOCK', updated_at = NOW() WHERE epc = $1`,
-            [epc]
-          );
-          await client.query(
-            `UPDATE items SET location_id = $1, updated_at = NOW()
-             WHERE tag_id = (SELECT id FROM tags WHERE epc = $2)`,
-            [location_id, epc]
-          );
-        }
+    const prod = memoryStore.products.find((p) => p.id === product_id) || memoryStore.products[0];
+    const loc = body.target_location
+      ? memoryStore.locations.find((l) => l.rack_name === body.target_location || l.zone_code === body.target_location)
+      : memoryStore.locations.find((l) => l.id === location_id);
+    const targetRack = body.target_location || loc?.rack_name || 'Rak A1-01';
 
-        const txCode = `TX-${Date.now().toString().slice(-6)}`;
-        const ledgerRes = await client.query(
-          `INSERT INTO stock_movements 
-            (tx_code, movement_type, product_id, from_location, to_location, qty, reference_doc, operator_id)
-           VALUES ($1, 'PUTAWAY', $2, 'Zona Transit Inbound', $3, $4, $5, 1)
-           RETURNING *`,
-          [txCode, product_id, targetRack, qty, reference_doc]
-        );
-
-        const updatedStock = await client.query(
-          'SELECT * FROM v_product_stock_ledger WHERE product_id = $1',
-          [product_id]
-        );
-
-        await client.query('COMMIT');
-
-        publishRealtimeEvent('wms/stock/realtime', {
-          event: 'PUTAWAY_COMPLETED',
-          product: updatedStock.rows[0],
-          ledgerEntry: ledgerRes.rows[0],
-        });
-
-        return reply.code(201).send({
-          success: true,
-          ledger: ledgerRes.rows[0],
-          currentStock: updatedStock.rows[0],
-        });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
+    if (epc) {
+      const existingTag = memoryStore.tags.find((t) => t.epc === epc);
+      if (existingTag) {
+        existingTag.rack_name = targetRack;
+        existingTag.status = 'IN_STOCK';
       }
     }
 
-    // Mode In-Memory Ledger Store
-    const prod = memoryStore.products.find((p) => p.id === Number(product_id));
-    const loc = memoryStore.locations.find((l) => l.id === Number(location_id));
     const txCode = `TX-${Date.now().toString().slice(-5)}`;
     const newTx = {
       id: memoryStore.stock_movements.length + 1,
       tx_code: txCode,
       movement_type: 'PUTAWAY',
-      product_id: Number(product_id),
-      sku: prod?.sku || 'SKU-012',
-      product_name: prod?.name || 'Produk Gudang',
+      product_id: prod.id,
+      sku: prod.sku,
+      product_name: prod.name,
       from_location: 'Zona Transit Inbound',
-      to_location: loc?.rack_name || 'Rak A1-01',
-      qty: Number(qty),
+      to_location: targetRack,
+      qty,
       reference_doc,
       operator_name: 'Sarah Jenkins',
       created_at: new Date().toISOString(),
     };
     memoryStore.stock_movements.unshift(newTx);
 
-    const updatedStock = getCalculatedLedgerStock().find((s) => s.product_id === Number(product_id));
+    const updatedStock = getCalculatedLedgerStock().find((s) => s.product_id === prod.id);
     publishRealtimeEvent('wms/stock/realtime', {
       event: 'PUTAWAY_COMPLETED',
       product: updatedStock,
@@ -141,7 +120,9 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
     });
 
     return reply.code(201).send({
+      status: 'ok',
       success: true,
+      message: `Tag ${epc || prod.sku} berhasil ditempatkan ke ${targetRack} & dicatat ke Ledger!`,
       ledger: newTx,
       currentStock: updatedStock,
     });

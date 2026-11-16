@@ -14,9 +14,11 @@ export const db = new Pool({
   max: 15,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-  ssl: {
-  rejectUnauthorized: false,
-},
+  ssl:
+    process.env.DATABASE_URL?.includes('supabase.com') ||
+    process.env.DATABASE_URL?.includes('sslmode=require')
+      ? { rejectUnauthorized: false }
+      : undefined,
 });
 
 export let isPostgresConnected = false;
