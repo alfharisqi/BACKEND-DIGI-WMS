@@ -5,6 +5,7 @@ import path from 'path';
 import dns from 'node:dns';
 
 // Memuat konfigurasi environment dari beberapa kemungkinan lokasi.
+// dotenv tidak menimpa variabel yang sudah tersedia di process.env.
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
@@ -12,22 +13,21 @@ dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 // Mengutamakan IPv4 untuk koneksi Supabase.
 dns.setDefaultResultOrder('ipv4first');
 
-// Pastikan DATABASE_URL tersedia di file .env.
-if (!process.env.DATABASE_URL) {
-  throw new Error(
-    '[PostgreSQL] DATABASE_URL tidak ditemukan. Periksa file .env.'
-  );
-}
+// Gunakan DATABASE_URL dari environment; jika tidak tersedia,
+// gunakan PostgreSQL Docker lokal untuk pengembangan.
+const databaseUrl =
+  process.env.DATABASE_URL ||
+  'postgresql://digiwms:digiwms_pass@localhost:6543/digiwms_db';
 
 // Koneksi PostgreSQL menggunakan Supabase atau Local/Docker.
 export const db = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: databaseUrl,
   max: 15,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
   ssl:
-    process.env.DATABASE_URL?.includes('supabase.com') ||
-    process.env.DATABASE_URL?.includes('sslmode=require')
+    databaseUrl.includes('supabase.com') ||
+    databaseUrl.includes('sslmode=require')
       ? { rejectUnauthorized: false }
       : undefined,
 });

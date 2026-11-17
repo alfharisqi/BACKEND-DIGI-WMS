@@ -1,3 +1,4 @@
+
 {
   "name": "digiwms-backend",
   "version": "1.0.0",
@@ -16,6 +17,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^9.0.1",
+    "@supabase/server": "^1.9.2",
     "bcryptjs": "^3.0.3",
     "dotenv": "^16.4.5",
     "fastify": "^4.28.1",
