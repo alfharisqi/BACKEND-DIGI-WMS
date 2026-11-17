@@ -9,15 +9,16 @@ import dns from 'node:dns';
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 // Mengutamakan IPv4 untuk koneksi Supabase.
 dns.setDefaultResultOrder('ipv4first');
 
 // Gunakan DATABASE_URL dari environment; jika tidak tersedia,
-// gunakan PostgreSQL Docker lokal untuk pengembangan.
+// gunakan Supabase Cloud default atau PostgreSQL Docker lokal.
 const databaseUrl =
   process.env.DATABASE_URL ||
-  'postgresql://digiwms:digiwms_pass@localhost:6543/digiwms_db';
+  'postgresql://postgres.oguvlbdowvnwyfggkcpl:0ZFyOBlh43t5Pm6W@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres';
 
 // Koneksi PostgreSQL menggunakan Supabase atau Local/Docker.
 export const db = new Pool({

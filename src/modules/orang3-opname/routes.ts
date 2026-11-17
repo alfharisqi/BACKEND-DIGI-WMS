@@ -657,4 +657,245 @@ const ledgerResult = await client.query(
       }
     }
   );
+
+  // ============================================================================
+  // [MVP 2 - FASE 2] MODUL KASIR POS (POINT OF SALE) & RETUR BARANG
+  // ============================================================================
+
+  // 4. GET Riwayat Transaksi Penjualan Kasir POS
+  app.get('/api/pos/sales', async (request, reply) => {
+    try {
+      if (isPostgresConnected) {
+        const res = await db.query(`
+          SELECT s.*, gp.pass_code AS "gatePass"
+          FROM sales s
+          LEFT JOIN gate_passes gp ON gp.sale_id = s.id OR gp.reference_resi = s.invoice_or_resi
+          WHERE s.order_type = 'POS'
+          ORDER BY s.created_at DESC
+          LIMIT 50
+        `);
+        return { status: 'ok', success: true, count: res.rows.length, data: res.rows };
+      }
+      return { status: 'ok', success: true, count: 0, data: [] };
+    } catch (err) {
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Gagal mengambil riwayat transaksi POS',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // 5. POST Checkout Penjualan Kasir (POS) & Terbitkan Struk + Gate Pass Otomatis
+  app.post('/api/pos/checkout', async (request, reply) => {
+    try {
+      const body = (request.body || {}) as {
+        customer_name?: string;
+        payment_method?: string;
+        cashier_id?: string;
+        items: Array<{
+          product_id?: string;
+          sku?: string;
+          name?: string;
+          epc?: string;
+          price?: number;
+          qty?: number;
+        }>;
+      };
+
+      if (!body.items || body.items.length === 0) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: 'Keranjang belanja POS tidak boleh kosong!',
+        });
+      }
+
+      const invoiceNo = `INV-POS-${Date.now().toString().slice(-6)}`;
+      const gatePassCode = `GP-POS-${Date.now().toString().slice(-4)}`;
+      const customer = body.customer_name || 'Pelanggan Umum (Walk-in)';
+      const paymentMethod = body.payment_method || 'QRIS / Tunai';
+
+      let totalItems = 0;
+      let totalAmount = 0;
+      body.items.forEach((item) => {
+        const q = item.qty || 1;
+        const p = item.price || 0;
+        totalItems += q;
+        totalAmount += p * q;
+      });
+
+      let saleRecord: Record<string, unknown> | null = null;
+      let gatePassRecord: Record<string, unknown> | null = null;
+
+      if (isPostgresConnected) {
+        // A. Insert ke tabel sales (Sesuai constraint CHECK: order_type IN ('POS', 'OUTBOUND_SHIPMENT'))
+        const sRes = await db.query(
+          `INSERT INTO sales (invoice_or_resi, order_type, customer_or_destination, courier, total_items, total_amount, payment_status, shipping_status, created_at)
+           VALUES ($1, 'POS', $2, 'Bawa Pulang (In-Store)', $3, $4, 'PAID', 'Selesai di Kasir', NOW())
+           RETURNING *`,
+          [invoiceNo, customer, totalItems, totalAmount]
+        );
+        saleRecord = sRes.rows[0];
+
+        // B. Terbitkan Gate Pass resmi untuk kasir
+        const gpRes = await db.query(
+          `INSERT INTO gate_passes (pass_code, sale_id, reference_resi, status, valid_until, created_at)
+           VALUES ($1, $2, $3, 'ACTIVE', NOW() + INTERVAL '4 HOURS', NOW())
+           RETURNING *`,
+          [gatePassCode, saleRecord?.id || null, invoiceNo]
+        );
+        gatePassRecord = gpRes.rows[0];
+
+        // C. Loop per item untuk update status tag ke AUTHORIZED_OUT dan catat Ledger Mutasi
+        for (const item of body.items) {
+          if (item.epc) {
+            await db.query(
+              `UPDATE tags SET status = 'AUTHORIZED_OUT', updated_at = NOW() WHERE epc = $1`,
+              [item.epc]
+            );
+          }
+
+          let prodId = item.product_id;
+          let prodSku = item.sku || 'SKU-POS';
+          if (!prodId) {
+            const pCheck = await db.query('SELECT id, sku FROM products LIMIT 1');
+            if (pCheck.rows.length > 0) {
+              prodId = pCheck.rows[0].id;
+              prodSku = pCheck.rows[0].sku;
+            }
+          }
+
+          if (prodId) {
+            const txCode = `TX-POS-${Date.now().toString().slice(-5)}-${Math.floor(Math.random() * 90 + 10)}`;
+            const itemQty = item.qty || 1;
+            await db.query(
+              `INSERT INTO stock_movements (tx_code, movement_type, product_id, sku, from_location, to_location, qty_change, qty_label, reference_doc, performed_by_name, created_at)
+               VALUES ($1, 'POS_SALE', $2, $3, 'Rak Kasir Toko', $4, $5, $6, $7, 'Kasir POS Toko', NOW())`,
+              [txCode, prodId, prodSku, `Pelanggan: ${customer}`, -itemQty, `-${itemQty}`, invoiceNo]
+            );
+          }
+        }
+      }
+
+      // Publish update live ke EMQX MQTT
+      publishRealtimeEvent('wms/stock/realtime', {
+        event: 'POS_SALE_COMPLETED',
+        invoice: invoiceNo,
+        gatePass: gatePassCode,
+        totalAmount,
+        totalItems,
+      });
+
+      return reply.code(201).send({
+        status: 'ok',
+        success: true,
+        message: `Pembayaran ${invoiceNo} berhasil! Gate Pass: ${gatePassCode}`,
+        data: {
+          invoice: invoiceNo,
+          gatePass: gatePassCode,
+          customer,
+          paymentMethod,
+          total_items: totalItems,
+          total_amount: totalAmount,
+          sale: saleRecord,
+          gatePassRecord,
+        },
+      });
+    } catch (err) {
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Gagal memproses transaksi checkout POS',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // 6. POST Retur Barang Pelanggan (Return & Restock ke Ledger)
+  app.post('/api/pos/return', async (request, reply) => {
+    try {
+      const body = (request.body || {}) as {
+        invoice_no: string;
+        epc?: string;
+        product_id?: string;
+        reason?: string;
+        target_rack?: string;
+      };
+
+      if (!body.invoice_no) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: 'Nomor invoice transaksi asli wajib disertakan untuk klaim retur!',
+        });
+      }
+
+      const targetRack = body.target_rack || 'Rak A1-01';
+      const reason = body.reason || 'Klaim Retur Pelanggan';
+
+      if (isPostgresConnected) {
+        // Cek apakah invoice ada di sales
+        const sRes = await db.query(
+          `SELECT * FROM sales WHERE invoice_or_resi = $1`,
+          [body.invoice_no.trim()]
+        );
+        if (sRes.rows.length === 0) {
+          return reply.code(404).send({
+            status: 'error',
+            success: false,
+            message: `Invoice ${body.invoice_no} tidak ditemukan di database penjualan!`,
+          });
+        }
+
+        // Kembalikan status Tag ke IN_STOCK
+        if (body.epc) {
+          await db.query(
+            `UPDATE tags SET status = 'IN_STOCK', updated_at = NOW() WHERE epc = $1`,
+            [body.epc.trim()]
+          );
+        }
+
+        // Catat mutasi penambahan kembali ke stock_movements
+        let prodId = body.product_id;
+        let prodSku = 'SKU-RETUR';
+        if (!prodId) {
+          const pCheck = await db.query('SELECT id, sku FROM products LIMIT 1');
+          if (pCheck.rows.length > 0) {
+            prodId = pCheck.rows[0].id;
+            prodSku = pCheck.rows[0].sku;
+          }
+        }
+
+        if (prodId) {
+          const txCode = `TX-RET-${Date.now().toString().slice(-5)}`;
+          await db.query(
+            `INSERT INTO stock_movements (tx_code, movement_type, product_id, sku, from_location, to_location, qty_change, qty_label, reference_doc, performed_by_name, created_at)
+             VALUES ($1, 'RETURN_RESTOCK', $2, $3, 'Klaim Retur Pelanggan', $4, 1, '+1', $5, 'Staf Layanan Retur', NOW())`,
+            [txCode, prodId, prodSku, targetRack, `${body.invoice_no} (${reason})`]
+          );
+        }
+      }
+
+      publishRealtimeEvent('wms/stock/realtime', {
+        event: 'RETURN_RESTOCK_COMPLETED',
+        invoice: body.invoice_no,
+        targetRack,
+      });
+
+      return reply.code(200).send({
+        status: 'ok',
+        success: true,
+        message: `Retur barang untuk invoice ${body.invoice_no} berhasil dibukukan kembali ke ${targetRack}`,
+      });
+    } catch (err) {
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Gagal memproses klaim retur barang',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
 }

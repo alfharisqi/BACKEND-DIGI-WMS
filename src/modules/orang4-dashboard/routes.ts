@@ -708,4 +708,166 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       emqxConnected: Boolean(mqttClient?.connected),
     };
   });
+
+  // ============================================================================
+  // [MVP 2 - FASE 2] GATE PASS SECURITY ENGINE & VERIFIKASI AKSES OTORISASI
+  // ============================================================================
+
+  // 10. GET Daftar Gate Pass Resmi (Filter ?status=ACTIVE / USED / EXPIRED)
+  app.get('/api/gate-passes', async (request, reply) => {
+    try {
+      const query = request.query as { status?: string };
+      const statusFilter = query.status?.toUpperCase();
+
+      if (isPostgresConnected) {
+        let sql = `
+          SELECT gp.*, s.invoice_or_resi, s.customer_or_destination, s.courier, s.total_items
+          FROM gate_passes gp
+          LEFT JOIN sales s ON gp.sale_id = s.id OR gp.reference_resi = s.invoice_or_resi
+        `;
+        const params: unknown[] = [];
+        if (statusFilter && statusFilter !== 'ALL') {
+          sql += ` WHERE UPPER(gp.status) = $1`;
+          params.push(statusFilter);
+        }
+        sql += ` ORDER BY gp.created_at DESC LIMIT 50`;
+        const res = await db.query(sql, params);
+        return { status: 'ok', success: true, count: res.rows.length, data: res.rows };
+      }
+
+      return { status: 'ok', success: true, count: 0, data: [] };
+    } catch (err) {
+      request.log?.error?.(err);
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Gagal memuat data Gate Pass',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // 11. GET Verifikasi Gate Pass Resmi (Digunakan Satpam & Portal Antena Gerbang RFID)
+  app.get('/api/gate-passes/:code/verify', async (request, reply) => {
+    try {
+      const { code } = request.params as { code: string };
+      const normalizedCode = code.trim().toUpperCase();
+
+      if (isPostgresConnected) {
+        const res = await db.query(
+          `SELECT gp.*, s.invoice_or_resi, s.customer_or_destination, s.courier, s.total_items, s.order_type
+           FROM gate_passes gp
+           LEFT JOIN sales s ON gp.sale_id = s.id OR gp.reference_resi = s.invoice_or_resi
+           WHERE UPPER(gp.pass_code) = $1`,
+          [normalizedCode]
+        );
+
+        if (res.rows.length === 0) {
+          return reply.code(404).send({
+            status: 'error',
+            success: false,
+            authorized: false,
+            message: `Gate Pass '${normalizedCode}' TIDAK DITEMUKAN di sistem!`,
+            diagnosis: 'ILLEGAL_PASS',
+          });
+        }
+
+        const pass = res.rows[0];
+        const isExpired = pass.valid_until && new Date(pass.valid_until).getTime() < Date.now();
+        const isAlreadyUsed = pass.status === 'USED';
+        const isAuthorized = pass.status === 'ACTIVE' && !isExpired;
+
+        return {
+          status: 'ok',
+          success: true,
+          authorized: isAuthorized,
+          pass_code: pass.pass_code,
+          status_pass: pass.status,
+          is_expired: isExpired,
+          is_already_used: isAlreadyUsed,
+          destination: pass.customer_or_destination || 'Penjualan Langsung POS',
+          courier: pass.courier || 'Kurir Standar',
+          reference: pass.reference_resi || pass.invoice_or_resi,
+          message: isAuthorized
+            ? `Gate Pass '${normalizedCode}' SAH & AKTIF. Barang diizinkan melintasi gerbang.`
+            : `Gate Pass '${normalizedCode}' DITOLAK (Status: ${pass.status}, Expired: ${isExpired}).`,
+          data: pass,
+        };
+      }
+
+      return reply.code(404).send({
+        status: 'error',
+        success: false,
+        authorized: false,
+        message: 'Database tidak terhubung untuk verifikasi Gate Pass',
+      });
+    } catch (err) {
+      request.log?.error?.(err);
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Gagal memverifikasi Gate Pass',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  // 12. POST Penerbitan Gate Pass Manual / Mandiri
+  app.post('/api/gate-passes/generate', async (request, reply) => {
+    try {
+      const body = (request.body || {}) as {
+        reference_resi: string;
+        destination?: string;
+        courier?: string;
+        sale_id?: string;
+        authorized_by?: string;
+      };
+
+      if (!body.reference_resi) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: 'Nomor referensi resi atau invoice wajib diisi!',
+        });
+      }
+
+      const passCode = `GP-${Math.floor(1000 + Math.random() * 9000)}-OK`;
+
+      if (isPostgresConnected) {
+        const res = await db.query(
+          `INSERT INTO gate_passes (pass_code, sale_id, reference_resi, status, valid_until, created_at)
+           VALUES ($1, $2, $3, 'ACTIVE', NOW() + INTERVAL '24 HOURS', NOW())
+           RETURNING *`,
+          [passCode, body.sale_id || null, body.reference_resi.trim()]
+        );
+
+        publishRealtimeEvent('wms/gate/pass-issued', {
+          event: 'GATE_PASS_ISSUED',
+          passCode,
+          reference: body.reference_resi,
+        });
+
+        return reply.code(201).send({
+          status: 'ok',
+          success: true,
+          message: `Gate Pass resmi ${passCode} berhasil diterbitkan (Berlaku 24 Jam)`,
+          data: res.rows[0],
+        });
+      }
+
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Database tidak terhubung untuk penerbitan Gate Pass',
+      });
+    } catch (err) {
+      request.log?.error?.(err);
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: 'Gagal menerbitkan Gate Pass',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
 }
