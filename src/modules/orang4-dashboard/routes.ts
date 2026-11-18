@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
 import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
 import { generateToken, authenticate, requireRoles } from '../../middleware/auth';
@@ -104,6 +105,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         activeRfidTags: active_rfid_tags,
         gateAlarmsCount: memoryStore.gate_events?.length || 2,
         totalInbound: total_inbound,
+        activeGatePasses: isPostgresConnected ? 0 : ((memoryStore.gate_passes as Array<Record<string, unknown>>) || []).filter(g => g.status === 'ACTIVE').length,
       },
       chartData: {
         days7,
@@ -707,5 +709,590 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       payload,
       emqxConnected: Boolean(mqttClient?.connected),
     };
+  });
+
+  // ============================================================================
+  // MODUL ORANG 4 (FASE 2): GATE PASS SECURITY ENGINE & OUTBOUND VERIFICATION
+  // ============================================================================
+
+  // 10. GET Daftar Gate Pass (MVP 2 - Orang 4)
+  app.get('/api/gate-passes', async (request) => {
+    const query = (request.query as Record<string, string>) || {};
+    const statusFilter = query.status?.toUpperCase();
+    const search = query.search?.toLowerCase();
+
+    if (isPostgresConnected) {
+      try {
+        let sql = `
+          SELECT 
+            gp.id,
+            gp.pass_code,
+            gp.sale_id,
+            gp.reference_resi,
+            gp.authorized_by,
+            u.full_name AS authorized_by_name,
+            gp.status,
+            gp.valid_until,
+            gp.used_at,
+            gp.created_at,
+            s.order_type,
+            s.customer_or_destination,
+            s.courier,
+            s.total_items,
+            s.total_amount
+          FROM gate_passes gp
+          LEFT JOIN sales s ON gp.sale_id = s.id
+          LEFT JOIN users u ON gp.authorized_by = u.id
+          WHERE 1=1
+        `;
+        const params: unknown[] = [];
+
+        if (statusFilter && ['ACTIVE', 'USED', 'EXPIRED', 'CANCELLED'].includes(statusFilter)) {
+          params.push(statusFilter);
+          sql += ` AND gp.status = $${params.length}`;
+        }
+
+        if (search) {
+          params.push(`%${search}%`);
+          sql += ` AND (LOWER(gp.pass_code) LIKE $${params.length} OR LOWER(COALESCE(gp.reference_resi, '')) LIKE $${params.length} OR LOWER(COALESCE(s.customer_or_destination, '')) LIKE $${params.length})`;
+        }
+
+        sql += ` ORDER BY gp.created_at DESC LIMIT 100`;
+
+        const res = await db.query(sql, params);
+        return {
+          status: 'ok',
+          success: true,
+          count: res.rows.length,
+          data: res.rows,
+        };
+      } catch (err: any) {
+        console.error('[Orang 4 Gate Pass List Error]:', err.message);
+      }
+    }
+
+    // In-memory Fallback
+    let list = ((memoryStore.gate_passes as Array<Record<string, unknown>>) || []);
+    if (statusFilter) {
+      list = list.filter((gp) => String(gp.status).toUpperCase() === statusFilter);
+    }
+    if (search) {
+      list = list.filter(
+        (gp) =>
+          String(gp.pass_code).toLowerCase().includes(search) ||
+          String(gp.reference_resi || '').toLowerCase().includes(search) ||
+          String(gp.customer_or_destination || '').toLowerCase().includes(search)
+      );
+    }
+
+    return {
+      status: 'ok',
+      success: true,
+      count: list.length,
+      data: list,
+    };
+  });
+
+  // 11. POST Terbitkan Gate Pass Baru (MVP 2 - Orang 4)
+  app.post('/api/gate-passes/generate', async (request, reply) => {
+    const body = (request.body as Record<string, any>) || {};
+    const {
+      sale_id,
+      reference_resi,
+      reference_type = 'OUTBOUND_SHIPMENT',
+      customer_or_destination,
+      courier,
+      epc_list = [],
+      authorized_by,
+      valid_hours = 24,
+    } = body;
+
+    if (!reference_resi && !sale_id) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: 'Nomor resi/invoice atau sale_id wajib diisi untuk menerbitkan Gate Pass',
+      });
+    }
+
+    const uniqueId = crypto.randomUUID();
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const pass_code = `GP-${Date.now().toString().slice(-4)}-${randomSuffix}`;
+    const validUntilDate = new Date(Date.now() + Number(valid_hours) * 3600 * 1000);
+
+    let createdPass: Record<string, any>;
+
+    if (isPostgresConnected) {
+      try {
+        const insertRes = await db.query(
+          `INSERT INTO gate_passes (id, pass_code, sale_id, reference_resi, authorized_by, status, valid_until, created_at)
+           VALUES ($1, $2, $3, $4, $5, 'ACTIVE', $6, NOW())
+           RETURNING *`,
+          [uniqueId, pass_code, sale_id || null, reference_resi || `REF-${randomSuffix}`, authorized_by || null, validUntilDate]
+        );
+        createdPass = insertRes.rows[0];
+
+        // Jika terdapat daftar tag RFID yang dibawa keluar, perbarui status menjadi AUTHORIZED_OUT
+        if (Array.isArray(epc_list) && epc_list.length > 0) {
+          await db.query(
+            `UPDATE tags SET status = 'AUTHORIZED_OUT', updated_at = NOW() WHERE epc = ANY($1)`,
+            [epc_list]
+          );
+        }
+
+        // Jika sale_id disediakan, perbarui status shipping di sales
+        if (sale_id) {
+          await db.query(
+            `UPDATE sales SET shipping_status = 'GATE_PASS_ISSUED' WHERE id = $1`,
+            [sale_id]
+          );
+        }
+      } catch (err: any) {
+        console.error('[Orang 4 Gate Pass Generate Error]:', err.message);
+        return reply.code(500).send({
+          status: 'error',
+          success: false,
+          message: `Gagal menerbitkan Gate Pass: ${err.message}`,
+        });
+      }
+    } else {
+      createdPass = {
+        id: uniqueId,
+        pass_code,
+        sale_id: sale_id || null,
+        reference_resi: reference_resi || `REF-${randomSuffix}`,
+        authorized_by: authorized_by || null,
+        status: 'ACTIVE',
+        valid_until: validUntilDate.toISOString(),
+        used_at: null,
+        created_at: new Date().toISOString(),
+        order_type: reference_type,
+        customer_or_destination: customer_or_destination || 'Tujuan Terdaftar',
+        courier: courier || 'Kurir Outbound',
+        total_items: epc_list.length || 1,
+      };
+
+      if (!memoryStore.gate_passes) memoryStore.gate_passes = [];
+      (memoryStore.gate_passes as Array<Record<string, unknown>>).unshift(createdPass);
+
+      if (Array.isArray(epc_list) && epc_list.length > 0) {
+        memoryStore.tags.forEach((t) => {
+          if (epc_list.includes(t.epc)) {
+            t.status = 'AUTHORIZED_OUT';
+          }
+        });
+      }
+    }
+
+    // Catat ke Audit Log
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 4,
+      user_name: 'Security Gatekeeper (Orang 4)',
+      action: 'GENERATE_GATE_PASS',
+      payload: {
+        pass_code,
+        reference_resi,
+        epc_count: epc_list.length,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    // Publikasi Real-time MQTT
+    publishRealtimeEvent('wms/gate/pass', {
+      event: 'GATE_PASS_GENERATED',
+      pass_code,
+      reference_resi,
+      status: 'ACTIVE',
+      valid_until: validUntilDate.toISOString(),
+      timestamp: new Date().toISOString(),
+    });
+
+    return reply.code(201).send({
+      status: 'ok',
+      success: true,
+      message: `Gate Pass resmi ${pass_code} berhasil diterbitkan!`,
+      data: createdPass,
+    });
+  });
+
+  // 12. GET Verifikasi Keabsahan Gate Pass (Scanner Satpam / Reader Gerbang)
+  app.get('/api/gate-passes/:code/verify', async (request, reply) => {
+    const { code } = request.params as { code: string };
+
+    let pass: Record<string, any> | null = null;
+    let associatedSales: Record<string, any> | null = null;
+
+    if (isPostgresConnected) {
+      try {
+        const gpRes = await db.query(
+          `SELECT 
+            gp.id,
+            gp.pass_code,
+            gp.sale_id,
+            gp.reference_resi,
+            gp.authorized_by,
+            u.full_name AS authorized_by_name,
+            gp.status,
+            gp.valid_until,
+            gp.used_at,
+            gp.created_at,
+            s.order_type,
+            s.customer_or_destination,
+            s.courier,
+            s.total_items,
+            s.total_amount
+           FROM gate_passes gp
+           LEFT JOIN sales s ON gp.sale_id = s.id
+           LEFT JOIN users u ON gp.authorized_by = u.id
+           WHERE gp.pass_code = $1 OR gp.reference_resi = $1 OR gp.id::text = $1
+           LIMIT 1`,
+          [code]
+        );
+
+        if (gpRes.rows.length > 0) {
+          const foundRow = gpRes.rows[0];
+          pass = foundRow;
+          if (foundRow.sale_id) {
+            associatedSales = {
+              order_type: foundRow.order_type,
+              destination: foundRow.customer_or_destination,
+              courier: foundRow.courier,
+              total_items: foundRow.total_items,
+              total_amount: foundRow.total_amount,
+            };
+          }
+        }
+      } catch (err: any) {
+        console.error('[Orang 4 Gate Pass Verify Error]:', err.message);
+      }
+    } else {
+      const found = ((memoryStore.gate_passes as Array<Record<string, any>>) || []).find(
+        (gp: any) => gp.pass_code === code || gp.reference_resi === code || gp.id === code
+      );
+      if (found) {
+        pass = found;
+      }
+    }
+
+    if (!pass) {
+      return reply.code(404).send({
+        status: 'error',
+        success: false,
+        is_valid: false,
+        verification_status: 'NOT_FOUND',
+        message: `Nomor Gate Pass "${code}" tidak ditemukan dalam sistem!`,
+      });
+    }
+
+    const now = new Date();
+    const validUntil = pass.valid_until ? new Date(pass.valid_until) : null;
+    const isExpired = validUntil && validUntil < now;
+
+    if (pass.status === 'USED') {
+      return reply.send({
+        status: 'warn',
+        success: false,
+        is_valid: false,
+        verification_status: 'ALREADY_USED',
+        message: `PERINGATAN: Gate Pass ${pass.pass_code} sudah pernah digunakan keluar pada ${pass.used_at || 'sebelumnya'}!`,
+        data: pass,
+      });
+    }
+
+    if (pass.status === 'CANCELLED') {
+      return reply.send({
+        status: 'warn',
+        success: false,
+        is_valid: false,
+        verification_status: 'CANCELLED',
+        message: `PERINGATAN: Gate Pass ${pass.pass_code} telah dibatalkan!`,
+        data: pass,
+      });
+    }
+
+    if (isExpired) {
+      return reply.send({
+        status: 'warn',
+        success: false,
+        is_valid: false,
+        verification_status: 'EXPIRED',
+        message: `PERINGATAN: Masa berlaku Gate Pass ${pass.pass_code} sudah habis!`,
+        data: pass,
+      });
+    }
+
+    return reply.send({
+      status: 'ok',
+      success: true,
+      is_valid: true,
+      verification_status: 'AUTHORIZED',
+      message: `Gate Pass ${pass.pass_code} SAH & AKTIF. Izin melintas gerbang disetujui!`,
+      data: pass,
+      details: associatedSales,
+    });
+  });
+
+  // 13. POST Konfirmasi Barang Keluar Gerbang (Status -> USED & Tag -> EXITED)
+  app.post('/api/gate-passes/:code/scan-out', async (request, reply) => {
+    const { code } = request.params as { code: string };
+    const body = (request.body as Record<string, any>) || {};
+    const {
+      gate_id = 'GATE-01',
+      antenna_info = 'Antena 1 & 2 (Portal Keluar)',
+      rssi = '-55 dBm',
+      scanned_epcs = [],
+      operator_name = 'Komandan Hendra (Gate)',
+    } = body;
+
+    let updatedPass: Record<string, any> | null = null;
+
+    if (isPostgresConnected) {
+      try {
+        const findRes = await db.query(
+          `SELECT * FROM gate_passes WHERE pass_code = $1 OR reference_resi = $1 OR id::text = $1`,
+          [code]
+        );
+
+        if (findRes.rows.length === 0) {
+          return reply.code(404).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass "${code}" tidak ditemukan!`,
+          });
+        }
+
+        const pass = findRes.rows[0];
+        if (pass.status === 'USED') {
+          return reply.code(400).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass ${pass.pass_code} sudah pernah digunakan keluar!`,
+          });
+        }
+
+        const updateRes = await db.query(
+          `UPDATE gate_passes SET status = 'USED', used_at = NOW() WHERE id = $1 RETURNING *`,
+          [pass.id]
+        );
+        updatedPass = updateRes.rows[0];
+
+        if (Array.isArray(scanned_epcs) && scanned_epcs.length > 0) {
+          await db.query(
+            `UPDATE tags SET status = 'EXITED', updated_at = NOW() WHERE epc = ANY($1)`,
+            [scanned_epcs]
+          );
+
+          for (const epc of scanned_epcs) {
+            await db.query(
+              `INSERT INTO gate_events (id, gate_id, epc, item_name, antenna_info, rssi, direction, authorization_status, action_taken, gate_pass_id, event_time)
+               VALUES ($1, $2, $3, $4, $5, $6, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $7, NOW())`,
+              [crypto.randomUUID(), gate_id, epc, `Barang Gate Pass ${pass.pass_code}`, antenna_info, rssi, pass.id]
+            );
+          }
+        } else {
+          await db.query(
+            `INSERT INTO gate_events (id, gate_id, epc, item_name, antenna_info, rssi, direction, authorization_status, action_taken, gate_pass_id, event_time)
+             VALUES ($1, $2, $3, $4, $5, $6, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $7, NOW())`,
+            [crypto.randomUUID(), gate_id, 'ALL_ITEMS', `Muatan Outbound: ${pass.reference_resi || pass.pass_code}`, antenna_info, rssi, pass.id]
+          );
+        }
+      } catch (err: any) {
+        console.error('[Orang 4 Gate Scan-Out Error]:', err.message);
+        return reply.code(500).send({
+          status: 'error',
+          success: false,
+          message: `Gagal mencatat konfirmasi keluar gerbang: ${err.message}`,
+        });
+      }
+    } else {
+      const foundIndex = ((memoryStore.gate_passes as Array<Record<string, any>>) || []).findIndex(
+        (gp: any) => gp.pass_code === code || gp.reference_resi === code || gp.id === code
+      );
+
+      if (foundIndex === -1) {
+        return reply.code(404).send({
+          status: 'error',
+          success: false,
+          message: `Gate Pass "${code}" tidak ditemukan!`,
+        });
+      }
+
+      const pass = (memoryStore.gate_passes as Array<Record<string, any>>)[foundIndex];
+      pass.status = 'USED';
+      pass.used_at = new Date().toISOString();
+      updatedPass = pass;
+
+      if (Array.isArray(scanned_epcs) && scanned_epcs.length > 0) {
+        memoryStore.tags.forEach((t) => {
+          if (scanned_epcs.includes(t.epc)) {
+            t.status = 'EXITED';
+          }
+        });
+      }
+
+      memoryStore.gate_events.unshift({
+        id: crypto.randomUUID(),
+        gate_id,
+        epc: scanned_epcs.join(', ') || 'ALL_ITEMS',
+        item_name: `Muatan Outbound: ${pass.reference_resi || pass.pass_code}`,
+        antenna_info,
+        rssi,
+        direction: 'OUT',
+        authorization_status: 'AUTHORIZED_OUT',
+        action_taken: 'Lolos Verifikasi Gate Pass Resmi',
+        gate_pass_id: pass.id,
+        event_time: new Date().toISOString(),
+      });
+    }
+
+    // Publikasi Real-time MQTT
+    publishRealtimeEvent('wms/gate/exit', {
+      event: 'GATE_EXIT_CONFIRMED',
+      pass_code: updatedPass?.pass_code,
+      gate_id,
+      operator_name,
+      timestamp: new Date().toISOString(),
+    });
+
+    return reply.send({
+      status: 'ok',
+      success: true,
+      message: `Konfirmasi berhasil! Barang telah resmi keluar melewati ${gate_id}. Status Gate Pass kini: USED.`,
+      data: updatedPass,
+    });
+  });
+
+  // 14. GET Riwayat Log Aktivitas Lintasan Gerbang RFID
+  app.get('/api/gate/events', async (request) => {
+    const query = (request.query as Record<string, string>) || {};
+    const limit = Number(query.limit) || 50;
+
+    if (isPostgresConnected) {
+      try {
+        const res = await db.query(
+          `SELECT 
+            ge.id,
+            ge.gate_id,
+            ge.epc,
+            ge.item_name,
+            ge.antenna_info,
+            ge.rssi,
+            ge.direction,
+            ge.authorization_status,
+            ge.action_taken,
+            ge.gate_pass_id,
+            ge.event_time,
+            gp.pass_code,
+            gp.reference_resi
+           FROM gate_events ge
+           LEFT JOIN gate_passes gp ON ge.gate_pass_id = gp.id
+           ORDER BY ge.event_time DESC
+           LIMIT $1`,
+          [limit]
+        );
+        return {
+          status: 'ok',
+          success: true,
+          count: res.rows.length,
+          data: res.rows,
+        };
+      } catch (err: any) {
+        console.error('[Orang 4 Gate Events Error]:', err.message);
+      }
+    }
+
+    const list = (memoryStore.gate_events || []).slice(0, limit);
+    return {
+      status: 'ok',
+      success: true,
+      count: list.length,
+      data: list,
+    };
+  });
+
+  // 15. POST Deteksi / Simulasi Pelanggaran Keamanan Gerbang (Anti-Theft Breach)
+  app.post('/api/gate/alarm-breach', async (request, reply) => {
+    const body = (request.body as Record<string, any>) || {};
+    const {
+      epc = 'E280-UNAUTH-9999',
+      item_name = 'Barang Tanpa Izin Keluar',
+      gate_id = 'GATE-01',
+      antenna_info = 'Antena 1 (Gerbang Keluar)',
+      rssi = '-42 dBm',
+      notes = 'Terdeteksi melintasi gerbang tanpa status AUTHORIZED_OUT / tanpa Gate Pass sah',
+    } = body;
+
+    const eventId = crypto.randomUUID();
+    const alarmId = crypto.randomUUID();
+
+    if (isPostgresConnected) {
+      try {
+        await db.query(
+          `INSERT INTO gate_events (id, gate_id, epc, item_name, antenna_info, rssi, direction, authorization_status, action_taken, event_time)
+           VALUES ($1, $2, $3, $4, $5, $6, 'OUT', 'UNAUTHORIZED', 'SIRENE DARURAT DIAKTIFKAN - GERBANG DIKUNCI', NOW())`,
+          [eventId, gate_id, epc, item_name, antenna_info, rssi]
+        );
+
+        await db.query(
+          `INSERT INTO alarms (id, gate_event_id, epc, item_name, severity, siren_triggered, wa_notified, status, notes, created_at)
+           VALUES ($1, $2, $3, $4, 'CRITICAL', true, false, 'ACTIVE', $5, NOW())`,
+          [alarmId, eventId, epc, item_name, notes]
+        );
+      } catch (err: any) {
+        console.error('[Orang 4 Alarm Breach Error]:', err.message);
+      }
+    } else {
+      memoryStore.gate_events.unshift({
+        id: eventId,
+        gate_id,
+        epc,
+        item_name,
+        antenna_info,
+        rssi,
+        direction: 'OUT',
+        authorization_status: 'UNAUTHORIZED',
+        action_taken: 'SIRENE DARURAT DIAKTIFKAN - GERBANG DIKUNCI',
+        event_time: new Date().toISOString(),
+      });
+
+      if (!memoryStore.alarms) memoryStore.alarms = [];
+      (memoryStore.alarms as Array<Record<string, unknown>>).unshift({
+        id: alarmId,
+        gate_event_id: eventId,
+        epc,
+        item_name,
+        severity: 'CRITICAL',
+        siren_triggered: true,
+        wa_notified: false,
+        status: 'ACTIVE',
+        notes,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    // Broadcast Alarm via EMQX MQTT
+    publishRealtimeEvent('wms/gate/alarm', {
+      event: 'SECURITY_BREACH_ALARM',
+      severity: 'CRITICAL',
+      epc,
+      item_name,
+      gate_id,
+      timestamp: new Date().toISOString(),
+    });
+
+    return reply.code(200).send({
+      status: 'warn',
+      success: true,
+      alarm_triggered: true,
+      message: '🚨 ALARM KEAMANAN DIAKTIFKAN: Deteksi barang keluar tanpa izin resmi!',
+      data: {
+        event_id: eventId,
+        alarm_id: alarmId,
+        epc,
+        item_name,
+        gate_id,
+      },
+    });
   });
 }
