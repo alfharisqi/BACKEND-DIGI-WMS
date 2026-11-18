@@ -11,6 +11,13 @@ import { orang4DashboardRoutes } from './modules/orang4-dashboard/routes';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+process.on('uncaughtException', (err) => {
+  console.error('[Process Uncaught Exception]:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process Unhandled Rejection]:', reason);
+});
+
 const app = Fastify({ logger: false });
 const PORT = Number(process.env.PORT) || 5000;
 

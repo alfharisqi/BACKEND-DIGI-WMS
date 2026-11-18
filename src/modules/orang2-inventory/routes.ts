@@ -360,6 +360,9 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
 
     try {
       client = await db.connect();
+      client.on('error', (clientErr) => {
+        app.log.error(clientErr, '[PostgreSQL Client Error in Putaway]');
+      });
       await client.query('BEGIN');
       transactionStarted = true;
 
@@ -657,7 +660,13 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         code: error.code,
       });
     } finally {
-      client?.release();
+      if (client) {
+        try {
+          client.release();
+        } catch {
+          // Abaikan error release saat socket terputus
+        }
+      }
     }
   });
 }
