@@ -228,15 +228,22 @@ if (!session_id || !Array.isArray(scanned_epcs)) {
 
       // 3. Ambil daftar EPC barang yang seharusnya ada di zona sesi
       const expectedResult = await db.query(
-        `SELECT t.epc
-   FROM items i
-   JOIN locations l ON i.location_id = l.id
-   JOIN tags t ON i.tag_id = t.id
-   WHERE l.zone_code = $1
-     AND i.status = 'IN_STOCK'
-     AND t.status = 'IN_STOCK'`,
-        [session.zone_code]
-      );
+  `
+  SELECT
+    t.epc,
+    p.id AS product_id,
+    p.sku,
+    p.name AS product_name
+  FROM items i
+  JOIN locations l ON i.location_id = l.id
+  JOIN tags t ON i.tag_id = t.id
+  JOIN products p ON i.product_id = p.id
+  WHERE l.zone_code = $1
+    AND i.status = 'IN_STOCK'
+    AND t.status = 'IN_STOCK'
+  `,
+  [session.zone_code]
+);
 
       // Ambil ringkasan stok sistem per produk berdasarkan zona
 const systemStockResult = await db.query(
@@ -282,16 +289,22 @@ const scannedStockResult = await db.query(
 );
   
 
-      const expectedEpcs = new Set(
-        expectedResult.rows.map((item) => item.epc)
-      );
+      
+// 3. Buat pemetaan EPC yang seharusnya berada di zona
+const expectedMap = new Map(
+  expectedResult.rows.map((item) => [item.epc, item])
+);
 
-      // 4. Cari EPC hasil scan di database
-      const actualResult = uniqueEpcs.length > 0
+const expectedEpcs = new Set(expectedMap.keys());
+
+// 4. Cari EPC hasil scan di database
+const actualResult = uniqueEpcs.length > 0
   ? await db.query(
       `
       SELECT
         t.epc,
+        t.status AS tag_status,
+        i.status AS item_status,
         l.zone_code,
         p.id AS product_id,
         p.sku,
@@ -305,8 +318,9 @@ const scannedStockResult = await db.query(
       [uniqueEpcs]
     )
   : { rows: [] };
-      const actualMap = new Map(
-  actualResult.rows.map((item) => [item.epc, item.zone_code])
+
+const actualMap = new Map(
+  actualResult.rows.map((item) => [item.epc, item])
 );
 
 // 5. Hitung hasil scan
@@ -317,22 +331,30 @@ const discrepancies: Array<Record<string, unknown>> = [];
 const scannedEpcs = new Set(uniqueEpcs);
 
 for (const epc of uniqueEpcs) {
-  if (expectedEpcs.has(epc)) {
-    matchedCount++;
-  } else if (actualMap.has(epc)) {
-    misplacedCount++;
+  const expectedItem = expectedMap.get(epc);
+  const actualItem = actualMap.get(epc);
 
-    const actualItem = actualResult.rows.find(
-      (item) => item.epc === epc
-    );
+  if (expectedItem) {
+    matchedCount++;
+    continue;
+  }
+
+  if (
+    actualItem &&
+    actualItem.tag_status === 'IN_STOCK' &&
+    actualItem.item_status === 'IN_STOCK' &&
+    actualItem.zone_code &&
+    actualItem.zone_code !== session.zone_code
+  ) {
+    misplacedCount++;
 
     discrepancies.push({
       epc,
       type: 'MISPLACED',
-      product_id: actualItem?.product_id,
-      sku: actualItem?.sku,
-      product_name: actualItem?.product_name,
-      actual_zone: actualItem?.zone_code,
+      product_id: actualItem.product_id,
+      sku: actualItem.sku,
+      product_name: actualItem.product_name,
+      actual_zone: actualItem.zone_code,
       expected_zone: session.zone_code,
     });
   } else {
@@ -344,42 +366,65 @@ for (const epc of uniqueEpcs) {
   }
 }
 
-      // Periksa barang yang seharusnya ada tetapi tidak terbaca
-      for (const epc of expectedEpcs) {
-        if (!scannedEpcs.has(epc)) {
-          discrepancies.push({
-            epc,
-            type: 'MISSING',
-            expected_zone: session.zone_code,
-          });
-        }
-      }
+// Periksa barang yang seharusnya ada tetapi tidak terbaca
+for (const [epc, expectedItem] of expectedMap) {
+  if (!scannedEpcs.has(epc)) {
+    discrepancies.push({
+      epc,
+      type: 'MISSING',
+      product_id: expectedItem.product_id,
+      sku: expectedItem.sku,
+      product_name: expectedItem.product_name,
+      expected_zone: session.zone_code,
+    });
+  }
+}
 
-      const missingCount = discrepancies.filter(
-        (item) => item.type === 'MISSING'
-      ).length;
+const missingCount = discrepancies.filter(
+  (item) => item.type === 'MISSING'
+).length;
 
-      // 6. Simpan hasil rekonsiliasi ke sesi yang sama
+
+      
+      // 6. Simpan hasil rekonsiliasi dan snapshot ke sesi yang sama
+      const auditSnapshot = {
+        zone_code: session.zone_code,
+        system_stock: systemStockResult.rows,
+        scanned_stock: scannedStockResult.rows,
+        scanned_at: new Date().toISOString(),
+      };
+
       const updateResult = await db.query(
-        `UPDATE stocktake_sessions
- SET total_scanned = $1,
-     matched_count = $2,
-     missing_count = $3,
-     misplaced_count = $4,
-     discrepancies = $5,
-     status = 'COMPLETED_PENDING_APPROVAL'
- WHERE id = $6
-   AND status = 'IN_PROGRESS'
- RETURNING *`,
+        `
+        UPDATE stocktake_sessions
+        SET total_scanned = $1,
+            matched_count = $2,
+            missing_count = $3,
+            misplaced_count = $4,
+            discrepancies = $5,
+            audit_snapshot = $6::jsonb,
+            status = 'COMPLETED_PENDING_APPROVAL'
+        WHERE id = $7
+          AND status = 'IN_PROGRESS'
+        RETURNING *
+        `,
         [
           uniqueEpcs.length,
           matchedCount,
           missingCount,
           misplacedCount,
           JSON.stringify(discrepancies),
+          JSON.stringify(auditSnapshot),
           session_id,
         ]
       );
+
+      if (updateResult.rows.length === 0) {
+        return reply.code(409).send({
+          success: false,
+          message: 'Sesi tidak ditemukan atau sudah tidak dalam status IN_PROGRESS.',
+        });
+      }
 
       // 7. Kirim informasi hasil melalui MQTT
       publishRealtimeEvent(
@@ -422,55 +467,37 @@ for (const epc of uniqueEpcs) {
       ],
     },
     async (request, reply) => {
-      const { session_code, adjustments } = request.body as {
-        session_code: string;
-        adjustments: {
-          product_id: string;
-          diff_qty: number;
-        }[];
-      };
+      const { session_code } = request.body as {
+  session_code: string;
+};
 
       const user = request.user;
 
       // 1. Validasi input
-      if (
-        !session_code ||
-        !Array.isArray(adjustments) ||
-        adjustments.some(
-          (item) =>
-            !item.product_id ||
-            !Number.isInteger(item.diff_qty) ||
-            item.diff_qty === 0
-        )
-      ) {
-        return reply.code(400).send({
-          success: false,
-          message: 'Data persetujuan atau penyesuaian tidak valid.',
-        });
-      }
+if (
+  !session_code ||
+  typeof session_code !== 'string' ||
+  !session_code.trim()
+) {
+  return reply.code(400).send({
+    success: false,
+    message: 'Kode sesi stock opname tidak valid.',
+  });
+}
 
-      const productIds = adjustments.map((item) => item.product_id);
+if (!user || typeof user.id !== 'string') {
+  return reply.code(401).send({
+    success: false,
+    message: 'Identitas supervisor tidak valid.',
+  });
+}
 
-      if (new Set(productIds).size !== productIds.length) {
-        return reply.code(400).send({
-          success: false,
-          message: 'Produk yang sama tidak boleh dikirim dua kali.',
-        });
-      }
-
-      if (!user || typeof user.id !== 'string') {
-        return reply.code(401).send({
-          success: false,
-          message: 'Identitas supervisor tidak valid.',
-        });
-      }
-
-      if (!isPostgresConnected) {
-        return reply.code(503).send({
-          success: false,
-          message: 'Database Supabase belum terhubung.',
-        });
-      }
+if (!isPostgresConnected) {
+  return reply.code(503).send({
+    success: false,
+    message: 'Database Supabase belum terhubung.',
+  });
+}
 
       const client = await db.connect();
 
@@ -479,12 +506,19 @@ for (const epc of uniqueEpcs) {
 
         // 2. Periksa dan kunci sesi opname
         const sessionResult = await client.query(
-          `SELECT id, status, zone_code
-           FROM stocktake_sessions
-           WHERE session_code = $1
-           FOR UPDATE`,
-          [session_code]
-        );
+  `
+  SELECT
+  id,
+  status,
+  zone_code,
+  audit_snapshot,
+  discrepancies
+FROM stocktake_sessions
+  WHERE session_code = $1
+  FOR UPDATE
+  `,
+  [session_code]
+);
 
         if (sessionResult.rows.length === 0) {
           await client.query('ROLLBACK');
@@ -506,6 +540,71 @@ for (const epc of uniqueEpcs) {
           });
         }
 
+        const snapshot = session.audit_snapshot;
+
+if (
+  !snapshot ||
+  typeof snapshot !== 'object' ||
+  snapshot.zone_code !== session.zone_code ||
+  !Array.isArray(snapshot.system_stock) ||
+  !Array.isArray(snapshot.scanned_stock)
+) {
+  await client.query('ROLLBACK');
+
+  return reply.code(400).send({
+    success: false,
+    message: 'Audit snapshot tidak tersedia atau tidak valid.',
+  });
+}
+
+// Periksa discrepancy hasil scan
+const discrepancies = Array.isArray(session.discrepancies)
+  ? session.discrepancies
+  : [];
+
+const missingEpcs = discrepancies.filter(
+  (item: any) => item.type === 'MISSING'
+);
+
+for (const discrepancy of missingEpcs) {
+  const epcResult = await client.query(
+    `
+    SELECT
+      t.epc,
+      t.status AS tag_status,
+      i.status AS item_status,
+      l.zone_code
+    FROM tags t
+    LEFT JOIN items i ON i.tag_id = t.id
+    LEFT JOIN locations l ON l.id = i.location_id
+    WHERE t.epc = $1
+    `,
+    [discrepancy.epc]
+  );
+
+  const epc = epcResult.rows[0];
+
+  if (
+    epc &&
+    epc.tag_status === 'IN_STOCK' &&
+    epc.item_status === 'IN_STOCK' &&
+    epc.zone_code === session.zone_code
+  ) {
+    await client.query('ROLLBACK');
+
+    return reply.code(409).send({
+      success: false,
+      message:
+        `Approval ditolak. EPC ${discrepancy.epc} ` +
+        'masih tercatat IN_STOCK di zona opname. ' +
+        'Perlu pemeriksaan fisik terlebih dahulu.',
+      epc: discrepancy.epc,
+      sku: discrepancy.sku,
+      zone_code: epc.zone_code,
+    });
+  }
+}
+
         // 3. Cari lokasi rak berdasarkan zona sesi
         const locationResult = await client.query(
           `SELECT id, code
@@ -526,89 +625,136 @@ for (const epc of uniqueEpcs) {
         }
 
         const location = locationResult.rows[0];
-        const ledgerEntries = [];
+        
+const ledgerEntries = [];
 
-        // 4. Proses seluruh penyesuaian produk
-        for (let index = 0; index < adjustments.length; index++) {
-          const adjustment = adjustments[index];
+// 4. Hitung penyesuaian berdasarkan audit_snapshot
+type SnapshotStockRow = {
+  product_id: string;
+  sku: string;
+  system_stock?: number;
+  scanned_stock?: number;
+};
 
-          const productResult = await client.query(
-            `SELECT p.id, p.sku
-             FROM products p
-             WHERE p.id = $1
-               AND EXISTS (
-                 SELECT 1
-                 FROM items i
-                 JOIN locations l ON i.location_id = l.id
-                 WHERE i.product_id = p.id
-                   AND l.zone_code = $2
-                   AND i.status = 'IN_STOCK'
-               )`,
-            [adjustment.product_id, session.zone_code]
-          );
+const systemRows = snapshot.system_stock as SnapshotStockRow[];
+const scannedRows = snapshot.scanned_stock as SnapshotStockRow[];
 
-          if (productResult.rows.length === 0) {
-            throw new Error(
-              `Produk ${adjustment.product_id} tidak ditemukan di zona opname.`
-            );
-          }
-
-          const product = productResult.rows[0];
-          const diffQty = adjustment.diff_qty;
-          const isIncrease = diffQty > 0;
-
-          const txCode = `TX-OPN-${Date.now()}-${index + 1}`;
-
-          const movementType = isIncrease
-            ? 'Stock Adjustment - Increase'
-            : 'Stock Adjustment - Decrease';
-
-          
-const ledgerResult = await client.query(
-  `INSERT INTO stock_movements (
-    tx_code,
-    movement_type,
-    product_id,
-    sku,
-    from_location,
-    to_location,
-    qty_change,
-    qty_label,
-    reference_doc,
-    performed_by_name,
-    performed_by,
-    from_location_id,
-    to_location_id
-  )
-  VALUES (
-    $1, $2, $3, $4, $5, $6,
-    $7, $8, $9, $10, $11, $12, $13
-  )
-  RETURNING *`,
-  [
-    txCode,
-    movementType,
-    product.id,
-    product.sku,
-    isIncrease
-      ? 'Penyesuaian stok'
-      : `Rak ${location.code}`,
-    isIncrease
-      ? `Rak ${location.code}`
-      : 'Penyesuaian stok',
-    diffQty,
-    `${Math.abs(diffQty)} Unit`,
-    session_code,
-    user.full_name || user.username,
-    user.id,
-    isIncrease ? null : location.id,
-    isIncrease ? location.id : null,
-  ]
+const systemMap = new Map(
+  systemRows.map((item) => [item.product_id, item])
 );
 
+const scannedMap = new Map(
+  scannedRows.map((item) => [item.product_id, item])
+);
 
-          ledgerEntries.push(ledgerResult.rows[0]);
-        }
+const productIds = new Set([
+  ...systemMap.keys(),
+  ...scannedMap.keys(),
+]);
+
+const adjustments = Array.from(productIds)
+  .map((productId) => {
+    const systemItem = systemMap.get(productId);
+    const scannedItem = scannedMap.get(productId);
+
+    const systemStock = Number(systemItem?.system_stock ?? 0);
+    const scannedStock = Number(scannedItem?.scanned_stock ?? 0);
+
+    return {
+      product_id: productId,
+      sku: systemItem?.sku ?? scannedItem?.sku,
+      diff_qty: scannedStock - systemStock,
+    };
+  })
+  .filter((item) => item.diff_qty !== 0);
+
+// 5. Proses seluruh penyesuaian produk
+for (let index = 0; index < adjustments.length; index++) {
+  const adjustment = adjustments[index];
+
+  const productResult = await client.query(
+    `SELECT p.id, p.sku
+     FROM products p
+     WHERE p.id = $1
+       AND EXISTS (
+         SELECT 1
+         FROM items i
+         JOIN locations l ON i.location_id = l.id
+         WHERE i.product_id = p.id
+           AND l.zone_code = $2
+           AND i.status = 'IN_STOCK'
+       )`,
+    [adjustment.product_id, session.zone_code]
+  );
+
+  if (productResult.rows.length === 0) {
+    throw new Error(
+      `Produk ${adjustment.product_id} tidak ditemukan di zona opname.`
+    );
+  }
+
+  const product = productResult.rows[0];
+
+  if (product.sku !== adjustment.sku) {
+    throw new Error(
+      `SKU produk ${adjustment.product_id} tidak sesuai dengan snapshot.`
+    );
+  }
+
+  const diffQty = adjustment.diff_qty;
+  const isIncrease = diffQty > 0;
+
+  const txCode = `TX-OPN-${Date.now()}-${index + 1}`;
+
+  const movementType = isIncrease
+    ? 'Stock Adjustment - Increase'
+    : 'Stock Adjustment - Decrease';
+
+  const ledgerResult = await client.query(
+    `INSERT INTO stock_movements (
+      tx_code,
+      movement_type,
+      product_id,
+      sku,
+      from_location,
+      to_location,
+      qty_change,
+      qty_label,
+      reference_doc,
+      performed_by_name,
+      performed_by,
+      from_location_id,
+      to_location_id
+    )
+    VALUES (
+      $1, $2, $3, $4, $5, $6,
+      $7, $8, $9, $10, $11, $12, $13
+    )
+    RETURNING *`,
+    [
+      txCode,
+      movementType,
+      product.id,
+      product.sku,
+      isIncrease
+        ? 'Penyesuaian stok'
+        : `Zona ${session.zone_code}`,
+      isIncrease
+        ? `Zona ${session.zone_code}`
+        : 'Penyesuaian stok',
+      diffQty,
+      `${Math.abs(diffQty)} Unit`,
+      session_code,
+      user.full_name || user.username,
+      user.id,
+      null,
+      null,
+    ]
+  );
+
+  ledgerEntries.push(ledgerResult.rows[0]);
+}
+
 
         // 5. Perbarui status sesi setelah semua transaksi berhasil
         await client.query(
