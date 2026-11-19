@@ -46,8 +46,14 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     let total_stock = 0;
     let total_inbound = 0;
     let active_rfid_tags = 0;
+    let active_gate_passes = 0;
+    let gate_alarms_count = 0;
+    let total_zones = memoryStore.locations.length;
     let low_stock_items: Array<Record<string, unknown>> = [];
     let all_stocks: Array<{ category: string; current_stock: number }> = [];
+
+    let days7: Array<{ label: string; inbound: number; outbound: number; opname: number }> = [];
+    let days30: Array<{ label: string; inbound: number; outbound: number; opname: number }> = [];
 
     if (isPostgresConnected) {
       const stockRes = await db.query('SELECT * FROM v_product_stock_ledger');
@@ -62,14 +68,97 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       const tagsRes = await db.query('SELECT COUNT(*)::INT AS active_tags FROM tags');
       active_rfid_tags = tagsRes.rows[0].active_tags;
 
+      const gpRes = await db.query(
+        "SELECT COUNT(*)::INT AS active_gp FROM gate_passes WHERE status = 'ACTIVE'"
+      );
+      active_gate_passes = gpRes.rows[0]?.active_gp || 0;
+
+      const alarmRes = await db.query(
+        "SELECT COUNT(*)::INT AS active_alarms FROM alarms WHERE status = 'ACTIVE'"
+      );
+      gate_alarms_count = alarmRes.rows[0]?.active_alarms || 0;
+
+      const locRes = await db.query('SELECT COUNT(*)::INT AS total_loc FROM locations');
+      total_zones = locRes.rows[0]?.total_loc || total_zones;
+
       low_stock_items = stockRes.rows.filter((s) => s.stock_status === 'STOK_RENDAH');
+
+      // Agregasi Tren 7 Hari Terakhir langsung dari tabel stock_movements
+      const d7Res = await db.query(`
+        WITH dates AS (
+          SELECT generate_series(CURRENT_DATE - INTERVAL '6 days', CURRENT_DATE, '1 day')::date AS dt
+        )
+        SELECT
+          TO_CHAR(d.dt, 'DD Mon') AS label,
+          (d.dt = CURRENT_DATE) AS is_today,
+          COALESCE(SUM(CASE WHEN sm.qty_change > 0 AND sm.movement_type NOT ILIKE '%OPNAME%' THEN sm.qty_change ELSE 0 END), 0)::INT AS inbound,
+          COALESCE(SUM(CASE WHEN sm.qty_change < 0 AND sm.movement_type NOT ILIKE '%OPNAME%' THEN ABS(sm.qty_change) ELSE 0 END), 0)::INT AS outbound,
+          COALESCE(SUM(CASE WHEN sm.movement_type ILIKE '%OPNAME%' THEN ABS(sm.qty_change) ELSE 0 END), 0)::INT AS opname
+        FROM dates d
+        LEFT JOIN stock_movements sm ON DATE(sm.created_at AT TIME ZONE 'Asia/Jakarta') = d.dt
+        GROUP BY d.dt
+        ORDER BY d.dt ASC
+      `);
+      days7 = d7Res.rows.map((r) => ({
+        label: r.is_today ? 'Hari Ini' : r.label,
+        inbound: Number(r.inbound) || 0,
+        outbound: Number(r.outbound) || 0,
+        opname: Number(r.opname) || 0,
+      }));
+
+      // Agregasi Tren 30 Hari (4 Minggu Terakhir) langsung dari tabel stock_movements
+      const d30Res = await db.query(`
+        WITH weeks AS (
+          SELECT generate_series(0, 3) AS w_idx
+        )
+        SELECT
+          'Minggu ' || (4 - w.w_idx) AS label,
+          w.w_idx,
+          COALESCE(SUM(CASE WHEN sm.qty_change > 0 AND sm.movement_type NOT ILIKE '%OPNAME%' THEN sm.qty_change ELSE 0 END), 0)::INT AS inbound,
+          COALESCE(SUM(CASE WHEN sm.qty_change < 0 AND sm.movement_type NOT ILIKE '%OPNAME%' THEN ABS(sm.qty_change) ELSE 0 END), 0)::INT AS outbound,
+          COALESCE(SUM(CASE WHEN sm.movement_type ILIKE '%OPNAME%' THEN ABS(sm.qty_change) ELSE 0 END), 0)::INT AS opname
+        FROM weeks w
+        LEFT JOIN stock_movements sm
+          ON sm.created_at >= (CURRENT_DATE - ((w.w_idx + 1) * 7 - 1) * INTERVAL '1 day')
+         AND sm.created_at < (CURRENT_DATE - (w.w_idx * 7) * INTERVAL '1 day' + INTERVAL '1 day')
+        GROUP BY w.w_idx
+        ORDER BY w.w_idx DESC
+      `);
+      days30 = d30Res.rows.map((r) => ({
+        label: r.label,
+        inbound: Number(r.inbound) || 0,
+        outbound: Number(r.outbound) || 0,
+        opname: Number(r.opname) || 0,
+      }));
     } else {
       const ledgerStocks = getCalculatedLedgerStock();
       all_stocks = ledgerStocks;
       total_stock = ledgerStocks.reduce((acc, s) => acc + s.current_stock, 0);
       total_inbound = memoryStore.goods_receipts.reduce((acc, g) => acc + g.total_qty, 0);
       active_rfid_tags = memoryStore.tags.length;
+      active_gate_passes = ((memoryStore.gate_passes as Array<Record<string, unknown>>) || []).filter(
+        (g) => g.status === 'ACTIVE'
+      ).length;
+      gate_alarms_count = ((memoryStore.alarms as Array<Record<string, unknown>>) || []).filter(
+        (a) => a.status === 'ACTIVE'
+      ).length;
       low_stock_items = ledgerStocks.filter((s) => s.stock_status === 'STOK_RENDAH');
+
+      days7 = [
+        { label: 'Hari -6', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Hari -5', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Hari -4', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Hari -3', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Hari -2', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Kemarin', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Hari Ini', inbound: total_inbound, outbound: 0, opname: 0 },
+      ];
+      days30 = [
+        { label: 'Minggu 1', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Minggu 2', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Minggu 3', inbound: 0, outbound: 0, opname: 0 },
+        { label: 'Minggu 4', inbound: total_inbound, outbound: 0, opname: 0 },
+      ];
     }
 
     const categoryMap: Record<string, number> = {};
@@ -81,31 +170,14 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       stock,
     }));
 
-    const days7 = [
-      { label: '6 Mei', inbound: 45, outbound: 18, opname: 40 },
-      { label: '7 Mei', inbound: 60, outbound: 24, opname: 55 },
-      { label: '8 Mei', inbound: 30, outbound: 15, opname: 35 },
-      { label: '9 Mei', inbound: 85, outbound: 32, opname: 75 },
-      { label: '10 Mei', inbound: 50, outbound: 20, opname: 48 },
-      { label: '11 Mei', inbound: 70, outbound: 28, opname: 65 },
-      { label: 'Hari Ini', inbound: 95, outbound: 35, opname: 90 },
-    ];
-
-    const days30 = [
-      { label: 'Minggu 1', inbound: 210, outbound: 95, opname: 195 },
-      { label: 'Minggu 2', inbound: 320, outbound: 140, opname: 300 },
-      { label: 'Minggu 3', inbound: 280, outbound: 120, opname: 270 },
-      { label: 'Minggu 4', inbound: 390, outbound: 165, opname: 375 },
-    ];
-
     const summaryData = {
       kpis: {
         totalSkus: all_stocks.length,
         totalPhysicalStock: total_stock,
         activeRfidTags: active_rfid_tags,
-        gateAlarmsCount: memoryStore.gate_events?.length || 2,
+        gateAlarmsCount: gate_alarms_count,
         totalInbound: total_inbound,
-        activeGatePasses: isPostgresConnected ? 0 : ((memoryStore.gate_passes as Array<Record<string, unknown>>) || []).filter(g => g.status === 'ACTIVE').length,
+        activeGatePasses: active_gate_passes,
       },
       chartData: {
         days7,
@@ -123,7 +195,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         total_stock,
         total_inbound,
         active_rfid_tags,
-        total_Zones: memoryStore.locations.length,
+        active_gate_passes,
+        gate_alarms_count,
+        total_Zones: total_zones,
         low_stock_items,
         category_distribution,
       },
