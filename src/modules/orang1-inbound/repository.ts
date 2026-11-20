@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { fail, Row, sameId } from './validation';
 
-type Table = 'products' | 'goods_receipts' | 'tags' | 'items' | 'stock_movements' | 'gate_events' | 'locations';
+type Table = 'products' | 'goods_receipts' | 'goods_receipt_lines' | 'tags' | 'items' | 'stock_movements' | 'gate_events' | 'locations';
 export interface Repository {
   transaction<T>(work: (repo: Repository) => Promise<T>): Promise<T>;
   all(table: Table): Promise<Row[]>;
@@ -12,8 +12,11 @@ export interface Repository {
   removeProduct(id: string): Promise<void>;
   columns(table: Table): Promise<string[]>;
   allowedValues(table: Table, column: string): Promise<string[] | undefined>;
-  audit(entity: string, entityId: unknown, action: string, before: Row | null, after: Row, reason?: string, required?: boolean): Promise<void>;
+  audit(entity: string, entityId: unknown, action: string, before: Row | null, after: Row, reason?: string, required?: boolean, actorId?: string): Promise<void>;
   history(entity: string, entityId: string): Promise<Row[]>;
+  account(id: string): Promise<Row | undefined>;
+  receiptLines(grnId: string): Promise<Row[]>;
+  clearReceiptLines(grnId: string): Promise<void>;
 }
 
 // Keep the existing seed arrays by reference. Extra inbound state lives only in this process.
@@ -43,6 +46,12 @@ export class MemoryRepository implements Repository {
     return run;
   }
   async all(table: Table) { return this.source[table] ?? []; }
+  async account(id: string) { return this.source.users?.find(user => sameId(user.id, id)); }
+  async receiptLines(grnId: string) { return (await this.all('goods_receipt_lines')).filter(line => sameId(line.grn_id, grnId)); }
+  async clearReceiptLines(grnId: string) {
+    const rows = this.source.goods_receipt_lines ??= [];
+    rows.splice(0, rows.length, ...rows.filter(line => !sameId(line.grn_id, grnId)));
+  }
   async get(table: Table, value: string) { return (await this.all(table)).find(row => sameId(row.id, value)); }
   async columns(table: Table) {
     const first = this.source[table]?.[0] ?? {};
@@ -60,7 +69,7 @@ export class MemoryRepository implements Repository {
     const uuidSource = table === 'products' && this.uuidProducts;
     const nextNumber = Math.max(this.sequences.get(table) ?? 0, ...rows.map(row => typeof row.id === 'number' ? row.id : typeof row.id === 'string' && /^\d+$/.test(row.id) && Number.isSafeInteger(Number(row.id)) ? Number(row.id) : 0)) + 1;
     this.sequences.set(table, nextNumber);
-    const nextId = uuidSource ? randomUUID() : nextNumber;
+    const nextId = uuidSource || table === 'goods_receipt_lines' ? randomUUID() : nextNumber;
     const row = { ...data, id: nextId, created_at: new Date().toISOString() };
     rows.push(row);
     if (table === 'items') this.syncTag(row);
@@ -83,8 +92,8 @@ export class MemoryRepository implements Repository {
     const index = this.source.products.findIndex(row => sameId(row.id, value));
     this.source.products.splice(index, 1);
   }
-  async audit(entity: string, entityId: unknown, action: string, before: Row | null, after: Row, reason?: string) {
-    this.source.orang1_inbound_audit.push(structuredClone({ entity_type: entity, entity_id: String(entityId), action, before_data: before, after_data: after, reason: reason ?? null, created_at: new Date().toISOString() }));
+  async audit(entity: string, entityId: unknown, action: string, before: Row | null, after: Row, reason?: string, _required?: boolean, actorId?: string) {
+    this.source.orang1_inbound_audit.push(structuredClone({ entity_type: entity, entity_id: String(entityId), action, before_data: before, after_data: after, reason: reason ?? null, actor_id: actorId ?? null, created_at: new Date().toISOString() }));
   }
   async history(entity: string, entityId: string) {
     return this.source.orang1_inbound_audit.filter(row => row.entity_type === entity && sameId(row.entity_id, entityId));
@@ -117,6 +126,17 @@ export class PostgresRepository implements Repository {
     finally { client.release(); }
   }
   async all(table: Table) { return (await this.query(`SELECT ${this.projection(table)} FROM ${table} ORDER BY id`)).rows; }
+  async account(id: string) {
+    return (await this.query('SELECT id::text AS id, role, is_active FROM users WHERE id::text=$1', [id])).rows[0];
+  }
+  async receiptLines(grnId: string) {
+    return (await this.query(`SELECT l.*, p.sku, p.name AS product_name,
+      (SELECT count(*)::int FROM items i JOIN tags t ON t.id=i.tag_id
+       WHERE i.grn_line_id=l.id AND t.status IN ('ENCODED','IN_STOCK','RESERVED','AUTHORIZED_OUT','EXITED')) AS tagged_qty
+      FROM goods_receipt_lines l JOIN products p ON p.id=l.product_id
+      WHERE l.grn_id=$1 ORDER BY p.sku,l.id`, [grnId])).rows;
+  }
+  async clearReceiptLines(grnId: string) { await this.query('DELETE FROM goods_receipt_lines WHERE grn_id=$1', [grnId]); }
   async get(table: Table, value: string) {
     // Opaque ID comparison: never cast an external UUID into an integer FK.
     return (await this.query(`SELECT ${this.projection(table)} FROM ${table} WHERE id::text = $1`, [value])).rows[0];
@@ -150,12 +170,15 @@ export class PostgresRepository implements Repository {
   }
   async removeProduct(value: string) { await this.query('DELETE FROM products WHERE id::text=$1', [value]); }
   private async hasAudit() { return Boolean((await this.query('SELECT to_regclass($1) AS name', [this.auditRelation()])).rows[0].name); }
-  async audit(entity: string, entityId: unknown, action: string, before: Row | null, after: Row, reason?: string, required = false) {
+  async audit(entity: string, entityId: unknown, action: string, before: Row | null, after: Row, reason?: string, required = false, actorId?: string) {
     if (!(await this.hasAudit())) {
       if (required) fail(409, 'Penyimpanan audit Orang 1 belum tersedia. Terapkan migrasi additive 001_orang1_inbound_audit.sql secara manual sebelum tindakan ini.');
       return;
     }
-    await this.query(`INSERT INTO ${this.auditRelation()} (entity_type, entity_id, action, before_data, after_data, reason) VALUES ($1,$2,$3,$4,$5,$6)`, [entity, String(entityId), action, before, after, reason ?? null]);
+    const values = [entity, String(entityId), action, before, after, reason ?? null];
+    const actorColumn = actorId && (await this.query(`SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass($1) AND attname='actor_id' AND NOT attisdropped`, [this.auditRelation()])).rowCount;
+    await this.query(`INSERT INTO ${this.auditRelation()} (entity_type, entity_id, action, before_data, after_data, reason${actorColumn ? ', actor_id' : ''})
+      VALUES ($1,$2,$3,$4,$5,$6${actorColumn ? ',$7' : ''})`, actorColumn ? [...values, actorId] : values);
   }
   async history(entity: string, entityId: string) {
     if (!(await this.hasAudit())) return [];

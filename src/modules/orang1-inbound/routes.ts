@@ -3,17 +3,25 @@ import { db, isPostgresConnected, memoryStore } from '../../config/db';
 import { publishRealtimeEvent } from '../../config/mqtt';
 import { MemoryRepository, PostgresRepository, Repository } from './repository';
 import { InboundService } from './service';
-import { body, id, InboundError, Row, text } from './validation';
+import { body, fail, id, InboundError, Row, text } from './validation';
+import { requireWarehouseAccount, warehouseSession } from '../warehouse-session';
 
 // Optional dependencies let tests use isolated stores and a real, isolated PostgreSQL pool.
 export interface InboundOptions { repository?: Repository; publish?: (topic: string, payload: Row) => void; }
 const memoryRepository = new MemoryRepository(memoryStore);
 const postgresRepository = new PostgresRepository(db);
 export async function orang1InboundRoutes(app: FastifyInstance, options: InboundOptions = {}) {
-  const service = () => new InboundService(options.repository ?? (isPostgresConnected ? postgresRepository : memoryRepository), options.publish ?? publishRealtimeEvent);
   const run = (handler: (s: InboundService, r: FastifyRequest) => Promise<unknown>, created = false) => async (request: FastifyRequest, reply: FastifyReply) => {
     try {
-      const data = await handler(service(), request);
+      const repository = options.repository ?? (isPostgresConnected ? postgresRepository : memoryRepository);
+      let actor: { id: string; role: string } | undefined;
+      if (request.method !== 'GET') {
+        const session = warehouseSession(request.headers.authorization, fail);
+        if (!options.repository && !isPostgresConnected) fail(503, 'Mutasi Inbound memerlukan PostgreSQL.');
+        requireWarehouseAccount(session, await repository.account(session.id), fail);
+        actor = session;
+      }
+      const data = await handler(new InboundService(repository, options.publish ?? publishRealtimeEvent, actor), request);
       // Preserve encode's legacy tag/item fields while offering the common data envelope.
       const legacy = request.method === 'POST' && ['/api/tags/encode', '/api/rfid/encode'].includes(request.url.split('?')[0]) ? data as Row : {};
       return reply.code(created ? 201 : 200).send({ ...legacy, status: 'ok', success: true, message: created ? 'Data berhasil disimpan.' : 'Operasi berhasil.', data });
@@ -44,7 +52,7 @@ export async function orang1InboundRoutes(app: FastifyInstance, options: Inbound
   app.get('/api/inbound/grn/:id', run((s, r) => s.grns(param(r))));
   app.post('/api/inbound/grn', run((s, r) => s.saveGrn(body(r.body)), true));
   app.put('/api/inbound/grn/:id', run((s, r) => s.saveGrn(body(r.body), param(r))));
-  app.patch('/api/inbound/grn/:id/verify', run((s, r) => s.verifyGrn(param(r))));
+  app.patch('/api/inbound/grn/:id/verify', run((s, r) => s.verifyGrn(param(r), body(r.body ?? {}))));
   app.patch('/api/inbound/grn/:id/cancel', run((s, r) => s.cancelGrn(param(r), body(r.body))));
   app.get('/api/tags', run(s => s.tags()));
   // Preserve main's RFID URL for existing clients while sharing validated business rules.
@@ -54,7 +62,7 @@ export async function orang1InboundRoutes(app: FastifyInstance, options: Inbound
   app.post('/api/rfid/encode', run(async (s, r) => {
     const input = body(r.body);
     let productId = input.product_id;
-    if (productId === undefined) {
+    if (productId === undefined && input.grn_line_id === undefined) {
       const sku = text(input.sku, 'SKU', 50);
       const product = (await s.products()).find(row => row.sku === sku);
       if (!product) throw new InboundError(404, 'SKU tidak ditemukan; produk tidak diganti dengan data lain.');
@@ -65,4 +73,5 @@ export async function orang1InboundRoutes(app: FastifyInstance, options: Inbound
   }, true));
   app.patch('/api/tags/:id', run((s, r) => s.updateTag(param(r), body(r.body))));
   app.patch('/api/tags/:id/deactivate', run((s, r) => s.deactivateTag(param(r), body(r.body))));
+  app.post('/api/tags/:id/replace', run((s, r) => s.replaceTag(param(r), body(r.body)), true));
 }
