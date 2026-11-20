@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { Pool } from 'pg';
+import { addQaInboundAccount } from './inbound-session';
 import { PostgresRepository } from '../src/modules/orang1-inbound/repository';
 
 export async function createSupabaseQa(expandedStatuses = false) {
@@ -21,6 +22,7 @@ export async function createSupabaseQa(expandedStatuses = false) {
   };
   try {
     await pool.query(await readFile('tests/fixtures/supabase-orang1.sql', 'utf8'));
+    await addQaInboundAccount(pool);
     if (expandedStatuses) {
       // QA capability scenario only. These changes are NOT approved/executed on Production.
       await pool.query(`ALTER TABLE goods_receipts DROP CONSTRAINT qa_grn_status;

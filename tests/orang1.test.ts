@@ -6,6 +6,7 @@ import Fastify from 'fastify';
 import { Pool } from 'pg';
 import { orang1InboundRoutes } from '../src/modules/orang1-inbound/routes';
 import { MemoryRepository, PostgresRepository, Repository } from '../src/modules/orang1-inbound/repository';
+import { qaInboundActor, qaInboundHeaders, addQaInboundAccount } from './inbound-session';
 import { Row } from '../src/modules/orang1-inbound/validation';
 
 const uuid1 = '18b635db-0ec3-41b1-a1ec-e15da1438ce2';
@@ -17,7 +18,7 @@ async function harness(kind: 'memory' | 'postgres', uuid: boolean) {
   const productId = uuid ? uuid1 : 1, secondId = uuid ? uuid2 : 2;
   const source: Record<string, Row[]> = {
     products: [{ ...productBody('TEST-ONE'), id: productId }, { ...productBody('TEST-TWO'), id: secondId }],
-    tags: [], goods_receipts: [], items: [], stock_movements: [], gate_events: [],
+    users: [qaInboundActor], tags: [], goods_receipts: [], items: [], stock_movements: [], gate_events: [],
   };
   let pool: Pool | undefined, admin: Pool | undefined, schema = '';
   let repository: Repository;
@@ -33,7 +34,9 @@ async function harness(kind: 'memory' | 'postgres', uuid: boolean) {
     let ddl = original.slice(original.indexOf('CREATE TABLE products'), original.indexOf('-- VIEW OTOMATIS'));
     if (uuid) ddl = ddl.replace(/(CREATE TABLE products\s*\(\s*id) SERIAL PRIMARY KEY/, '$1 UUID PRIMARY KEY DEFAULT gen_random_uuid()').replaceAll('product_id INT NOT NULL', 'product_id UUID NOT NULL');
     const gates = original.slice(original.indexOf('CREATE TABLE gate_events'), original.indexOf('CREATE TABLE alarms'));
-    await pool.query('CREATE TABLE users (id SERIAL PRIMARY KEY)');
+    await pool.query('CREATE TABLE users (id UUID PRIMARY KEY DEFAULT gen_random_uuid())');
+    ddl = ddl.replace(/(\w+) INT REFERENCES users\(id\)/g, '$1 UUID REFERENCES users(id)');
+    await addQaInboundAccount(pool);
     await pool.query(ddl + gates);
     // Only the trusted migration's schema identifiers are relocated into this disposable QA schema.
     const auditMigration = (await readFile('sql/migrations/001_orang1_inbound_audit.sql', 'utf8')).replaceAll('public.', `${schema}.`).replaceAll("'public'", `'${schema}'`);
@@ -47,7 +50,7 @@ async function harness(kind: 'memory' | 'postgres', uuid: boolean) {
   await app.register(orang1InboundRoutes, { repository, publish: (topic, payload) => { events.push({ topic, payload }); } });
   await app.ready();
   const request = async (method: string, path: string, payload?: Row, expected = 200) => {
-    const response = await app.inject({ method: method as any, url: `/api${path}`, payload });
+    const response = await app.inject({ headers: qaInboundHeaders(), method: method as any, url: `/api${path}`, payload });
     const json = response.json();
     assert.equal(response.statusCode, expected, `${method} ${path}: ${JSON.stringify(json)}`);
     assert.equal(json.success, expected < 400, `success envelope: ${JSON.stringify(json)}`);
@@ -250,7 +253,7 @@ for (const kind of ['memory', 'postgres'] as const) for (const uuid of [false, t
       const app = Fastify();
       await app.register(orang1InboundRoutes, { repository: h.repository, publish: () => { throw new Error('Broker offline'); } });
       try {
-        const response = await app.inject({ method: 'POST', url: '/api/tags/encode', payload: { product_id: h.productId, epc_custom: '300833B2DDD901400000000D' } });
+        const response = await app.inject({ headers: qaInboundHeaders(), method: 'POST', url: '/api/tags/encode', payload: { product_id: h.productId, epc_custom: '300833B2DDD901400000000D' } });
         assert.equal(response.statusCode, 201);
         assert.ok((await h.repository.all('tags')).some(t => t.epc === '300833B2DDD901400000000D'));
       } finally { await app.close(); }
@@ -266,7 +269,7 @@ for (const kind of ['memory', 'postgres'] as const) for (const uuid of [false, t
         })();
       } });
       try {
-        const response = await app.inject({ method: 'POST', url: '/api/tags/encode', payload: { product_id: h.productId } });
+        const response = await app.inject({ headers: qaInboundHeaders(), method: 'POST', url: '/api/tags/encode', payload: { product_id: h.productId } });
         assert.equal(response.statusCode, 201); assert.ok(observed); await observed;
       } finally { await app.close(); }
     });
@@ -308,14 +311,14 @@ for (const kind of ['memory', 'postgres'] as const) for (const uuid of [false, t
 }
 
 test('Memory UUID contract survives deleting all rows and native field updates stay consistent', async () => {
-  const source = { products: [{ id: uuid1, sku: 'UUID-ONLY', name: 'UUID', category: 'QA', unit_price: 5, min_stock_threshold: 1 }], tags: [], goods_receipts: [], items: [], stock_movements: [], gate_events: [] };
+  const source = { products: [{ id: uuid1, sku: 'UUID-ONLY', name: 'UUID', category: 'QA', unit_price: 5, min_stock_threshold: 1 }], users: [qaInboundActor], tags: [], goods_receipts: [], items: [], stock_movements: [], gate_events: [] };
   const repository = new MemoryRepository(source), app = Fastify();
   await app.register(orang1InboundRoutes, { repository, publish: () => {} });
   try {
-    const update = await app.inject({ method: 'PUT', url: `/api/products/${uuid1}`, payload: { ...productBody('UUID-ONLY'), price: 99 } });
+    const update = await app.inject({ headers: qaInboundHeaders(), method: 'PUT', url: `/api/products/${uuid1}`, payload: { ...productBody('UUID-ONLY'), price: 99 } });
     assert.equal(update.statusCode, 200); assert.equal(update.json().data.unit_price, 99);
-    assert.equal((await app.inject({ method: 'DELETE', url: `/api/products/${uuid1}` })).statusCode, 200);
-    const create = await app.inject({ method: 'POST', url: '/api/products', payload: productBody('UUID-STILL') });
+    assert.equal((await app.inject({ headers: qaInboundHeaders(), method: 'DELETE', url: `/api/products/${uuid1}` })).statusCode, 200);
+    const create = await app.inject({ headers: qaInboundHeaders(), method: 'POST', url: '/api/products', payload: productBody('UUID-STILL') });
     assert.equal(create.statusCode, 201); assert.match(create.json().data.id, /^[0-9a-f-]{36}$/);
   } finally { await app.close(); }
 });

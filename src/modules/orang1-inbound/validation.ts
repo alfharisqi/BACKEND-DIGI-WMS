@@ -32,12 +32,23 @@ export function productInput(b: Row): Row {
   if (b.default_location_code !== undefined) result.default_location_code = b.default_location_code === null || b.default_location_code === '' ? null : text(b.default_location_code, 'Lokasi default', 100);
   return result;
 }
-export function grnInput(b: Row): Row {
+export function receiptLinesInput(value: unknown) {
+  if (!Array.isArray(value) || !value.length || value.length > 200) return fail(400, 'Isi 1 hingga 200 baris SKU.');
+  const lines = value.map(entry => {
+    const line = body(entry);
+    return { product_id: id(line.product_id), received_qty: numeric(line.received_qty, 'Jumlah diterima', true, 1) };
+  });
+  if (new Set(lines.map(line => line.product_id.toLowerCase())).size !== lines.length) fail(400, 'SKU tidak boleh duplikat dalam satu GRN.');
+  const total = numeric(lines.reduce((sum, line) => sum + line.received_qty, 0), 'Total unit', true, 1);
+  return { lines, total };
+}
+
+export function grnInput(b: Row, total?: number): Row {
   if (b.status !== undefined && b.status !== 'MENUNGGU_VERIFIKASI') fail(409, 'Gunakan endpoint verifikasi atau pembatalan untuk perubahan status GRN.');
   if (b.rfid_tagging_status !== undefined && b.rfid_tagging_status !== 'MENUNGGU_TAGGING') fail(409, 'Status RFID tidak dapat dinyatakan selesai tanpa konfirmasi tagging.');
   const date = b.receipt_date === undefined ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()) : b.receipt_date;
   if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date.startsWith('0000') || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) fail(400, 'Tanggal penerimaan tidak valid (YYYY-MM-DD).');
-  const result: Row = { po_number: text(b.po_number, 'Nomor PO', 50), supplier_name: text(b.supplier_name, 'Supplier'), receipt_date: date, total_qty: numeric(b.total_qty, 'Jumlah barang', true, 1) };
+  const result: Row = { po_number: text(b.po_number, 'Nomor PO', 50), supplier_name: text(b.supplier_name, 'Supplier'), receipt_date: date, total_qty: total ?? numeric(b.total_qty, 'Jumlah barang', true, 1) };
   if (b.product_id != null && b.product_id !== '') result.product_id = id(b.product_id);
   return result;
 }

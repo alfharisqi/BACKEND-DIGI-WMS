@@ -12,9 +12,10 @@ import cors from '@fastify/cors';
 import { Pool } from 'pg';
 import { orang1InboundRoutes } from '../../src/modules/orang1-inbound/routes';
 import { PostgresRepository } from '../../src/modules/orang1-inbound/repository';
+import { addQaInboundAccount, qaInboundToken } from '../inbound-session';
 
 const root = path.resolve('tests/postman');
-const evidence = path.join(root, 'evidence'); mkdirSync(evidence, { recursive: true });
+const evidence = process.env.ORANG1_POSTMAN_EVIDENCE || path.join(root, 'evidence'); mkdirSync(evidence, { recursive: true });
 const toolsRoot = process.env.ORANG1_POSTMAN_TOOLS || path.join(os.tmpdir(), 'digiwms-postman-tools');
 const toolRequire = createRequire(path.join(toolsRoot, 'package.json'));
 const newman = toolRequire('newman');
@@ -50,10 +51,10 @@ function check(name: string, fn: () => void) { fn(); checks.push({ name, status:
 function baseline() {
   const result: Record<string, string> = {};
   for (const repo of ['BACKEND-DIGI-WMS', 'FRONTEND-DIGI-WMS']) {
-    const base = path.resolve('..', repo);
+    const base = repo === 'BACKEND-DIGI-WMS' ? path.dirname(path.dirname(root)) : process.env.ORANG1_POSTMAN_FRONTEND || path.resolve('..', repo);
     const walk = (dir: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
-        if (['.git','node_modules','dist'].includes(e.name)) continue;
+        if (['.git','node_modules','dist'].includes(e.name) || /^\.env(?:\.|$)/.test(e.name)) continue;
         const p = path.join(dir, e.name);
         if (p === root) continue;
         if (e.isDirectory()) walk(p);
@@ -67,6 +68,9 @@ function baseline() {
 const before = baseline();
 
 async function run(label: string, collection: any, environment: any, expectedFailure = false) {
+  if (collection.info.name === json(collectionName).info.name) {
+    environment.values.push({ key: 'qaSession', value: qaInboundToken(), enabled: true });
+  }
   const began = new Date();
   const summary: any = await new Promise((resolve, reject) => {
     newman.run({ collection, environment, reporters: [], bail: true, timeoutRequest: 8000, timeoutScript: 10000, iterationCount: 1 }, (err: any, data: any) => err ? reject(err) : resolve(data));
@@ -142,6 +146,7 @@ async function fixture(extended: boolean) {
   if (extended) ddl = ddl.replace("('MENUNGGU_VERIFIKASI','SELESAI')", "('MENUNGGU_VERIFIKASI','SELESAI','DIBATALKAN')")
     .replace("('UNASSIGNED','ENCODED','IN_STOCK','RESERVED','AUTHORIZED_OUT','EXITED')", "('UNASSIGNED','ENCODED','IN_STOCK','RESERVED','AUTHORIZED_OUT','EXITED','DAMAGED')");
   await pool.query(ddl);
+  await addQaInboundAccount(pool);
   await pool.query(`CREATE TABLE orang1_inbound_audit (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     entity_type TEXT NOT NULL CHECK(entity_type IN ('product','grn','tag')),
@@ -240,9 +245,12 @@ async function main() {
       const f = await fixture(extended);
       await f.app.listen({port:5001,host:'127.0.0.1'});
       if (serve) {
-        console.log('Disposable Postman QA ready: http://127.0.0.1:5001 ; mode='+ (extended?'capability':'strict') +'; MQTT=spy; Ctrl+C cleans up task-owned schema/cluster.');
-        await new Promise<void>(resolve=>{process.once('SIGINT',()=>resolve());process.once('SIGTERM',()=>resolve());});
-        await f.close(); break;
+        const sessionFile = path.join(cluster, 'postman-qa-session.txt');
+        writeFileSync(sessionFile, qaInboundToken(), { flag: 'wx', mode: 0o600 });
+        console.log('Disposable Postman QA ready: http://127.0.0.1:5001 ; mode='+ (extended?'capability':'strict') +'; MQTT=spy. Set qaSession from '+sessionFile);
+        try { await new Promise<void>(resolve=>{process.once('SIGINT',()=>resolve());process.once('SIGTERM',()=>resolve());}); }
+        finally { unlinkSync(sessionFile); await f.close(); }
+        break;
       }
       try {
         const {summary,record} = await run(extended?'qa-capability':'qa-strict',json(collectionName),json(environmentName));
@@ -250,7 +258,9 @@ async function main() {
         await integration(f,summary.environment,extended);
       } finally { await f.close(); }
     }
-    if (!serve && !process.argv.includes('--qa-only')) await run('production-readonly',json('DigiWMS_Orang1_Production_ReadOnly.postman_collection.json'),json('DigiWMS_Orang1_Production_ReadOnly.postman_environment.json'));
+    if (!serve && process.argv.includes('--production-readonly') && !process.argv.includes('--qa-only')) {
+      await run('production-readonly', json('DigiWMS_Orang1_Production_ReadOnly.postman_collection.json'), json('DigiWMS_Orang1_Production_ReadOnly.postman_environment.json'));
+    }
   } finally { await stop(); }
   check('Existing source/config/env/migrations unchanged by runner',()=>assert.deepEqual(baseline(),before));
   if(serve) return;

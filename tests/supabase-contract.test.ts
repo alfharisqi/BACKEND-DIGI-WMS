@@ -1,6 +1,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
+import { qaInboundHeaders } from './inbound-session';
 import { createSupabaseQa } from './qa-supabase';
 import { orang1InboundRoutes } from '../src/modules/orang1-inbound/routes';
 
@@ -10,7 +11,7 @@ for (const expanded of [false, true]) describe(`Supabase UUID contract / ${expan
   before(async () => { qa = await createSupabaseQa(expanded); app = Fastify(); await app.register(orang1InboundRoutes, { repository: qa.repository, publish: (topic, payload) => events.push({ topic, payload }) }); });
   after(async () => { await app?.close(); await qa?.close(); });
   const request = async (method: any, path: string, payload?: any, expected = 200) => {
-    const response = await app.inject({ method, url: `/api${path}`, payload }); const json = response.json();
+    const response = await app.inject({ headers: qaInboundHeaders(), method, url: `/api${path}`, payload }); const json = response.json();
     assert.equal(response.statusCode, expected, JSON.stringify(json)); assert.equal(json.success, expected < 400); return json.data;
   };
   const grn = (po: string) => request('POST', '/inbound/grn', { po_number: po, supplier_name: 'QA Supplier', total_qty: 2 }, 201);
@@ -70,13 +71,24 @@ for (const expanded of [false, true]) describe(`Supabase UUID contract / ${expan
       assert.equal((await request('GET', `/tags/${damaged.id}`)).audit_history.at(-1).reason, 'QA damaged');
       assert.equal((await request('GET', `/inbound/grn/${row.id}`)).status, 'DIBATALKAN');
     } else {
-      const response = await app.inject({ method: 'PATCH', url: `/api/inbound/grn/${row.id}/cancel`, payload: { reason: 'QA reject' } });
+      const response = await app.inject({ headers: qaInboundHeaders(), method: 'PATCH', url: `/api/inbound/grn/${row.id}/cancel`, payload: { reason: 'QA reject' } });
       assert.equal(response.statusCode, 409); assert.match(response.json().message, /belum mendukung status DIBATALKAN/);
-      const deactivate = await app.inject({ method: 'PATCH', url: `/api/tags/${result.tag.id}/deactivate`, payload: { reason: 'QA reject' } });
+      const deactivate = await app.inject({ headers: qaInboundHeaders(), method: 'PATCH', url: `/api/tags/${result.tag.id}/deactivate`, payload: { reason: 'QA reject' } });
       assert.equal(deactivate.statusCode, 409); assert.match(deactivate.json().message, /belum mendukung status DAMAGED/);
       assert.equal((await request('GET', `/tags/${result.tag.id}`)).status, 'ENCODED');
       assert.equal((await qa.pool.query('SELECT COUNT(*)::int AS total FROM orang1_inbound_audit')).rows[0].total, count);
     }
+  });
+  test('Unauthenticated and non-warehouse requests fail before legacy constraint checks', async () => {
+    const receipt = await grn('QA-AUTH');
+    const tag = await encode();
+    for (const url of [`/api/inbound/grn/${receipt.id}/cancel`, `/api/tags/${tag.tag.id}/deactivate`]) {
+      const request = { method: 'PATCH' as const, url, payload: { reason: 'QA authorization' } };
+      assert.equal((await app.inject(request)).statusCode, 401);
+      assert.equal((await app.inject({ ...request, headers: qaInboundHeaders('KASIR_POS') })).statusCode, 403);
+    }
+    assert.equal((await request('GET', `/inbound/grn/${receipt.id}`)).status, 'MENUNGGU_VERIFIKASI');
+    assert.equal((await request('GET', `/tags/${tag.tag.id}`)).status, 'ENCODED');
   });
   test('Ledger tag_id and item transaction status prevent reassignment/deactivation', async () => {
     const result = await encode();
