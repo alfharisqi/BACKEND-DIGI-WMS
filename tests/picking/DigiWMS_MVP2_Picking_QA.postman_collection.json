@@ -1,0 +1,343 @@
+{
+  "info": {
+    "name": "DigiWMS MVP 2 — Orang 1 Picking QA",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Jalankan berurutan pada fixture disposable di 127.0.0.1:5102. Autentikasi QA disediakan saat runtime. Mulai dengan fixture baru setiap run."
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "function deny(message) {",
+          "  pm.request.url.update('http://127.0.0.1:1/PICKING-QA-BLOCKED');",
+          "  pm.execution.setNextRequest(null);",
+          "  pm.test(message, () => { throw new Error(message); });",
+          "  if (pm.execution.skipRequest) pm.execution.skipRequest();",
+          "  throw new Error(message);",
+          "}",
+          "if (pm.variables.get('baseUrl') !== 'http://127.0.0.1:5102/api') deny('Target wajib server Picking QA port 5102.');",
+          "if (!pm.environment.get('qaToken')) deny('Token sesi QA belum diisi.');",
+          "if (pm.request.method === 'POST' && /{{[^}]+}}/.test(pm.variables.replaceIn(pm.request.body.raw))) deny('Variabel fixture QA belum terisi.');",
+          "pm.sendRequest('http://127.0.0.1:5102/api/health', (err,res) => {",
+          "  if (err || res.code !== 200) return deny('Server QA tidak tersedia.');",
+          "  const identity = res.json().qa;",
+          "  if (!identity || identity.kind !== 'digiwms-picking-disposable-pg' || identity.isolated !== true) return deny('Identitas cluster QA tidak terbukti.');",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "GET Picking Orders",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/picking/orders?status=MENUNGGU_PICKING",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          }
+        ]
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(true); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "const order = json.data.find(order => order.order_number === pm.environment.get('orderNumber'));",
+              "pm.test('Pesanan dan rak sesuai fixture', () => { pm.expect(order).to.be.an('object'); pm.expect(order.picked_qty).to.eql(0); pm.expect(order.requested_qty).to.eql(2); pm.expect(order.lines[0].locations).to.have.length.above(0); });",
+              "if (order) pm.environment.set('orderId',order.id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Invalid Scan",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"epc\": \"INVALID-EPC\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 400', () => pm.response.to.have.status(400));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(false); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('Format EPC ditolak', () => pm.expect(json.message).to.include('EPC'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Valid Scan",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"epc\": \"{{validEpc}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(true); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('Status tag dan item RESERVED, progres 1/2', () => { pm.expect(json.data.tag_status).to.eql('RESERVED'); pm.expect(json.data.item_status).to.eql('RESERVED'); pm.expect(json.data.order.picked_qty).to.eql(1); pm.expect(json.data.order.requested_qty).to.eql(2); pm.expect(json.data.order.status).to.eql('SEDANG_DIAMBIL'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Duplicate Scan",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"epc\": \"{{validEpc}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 409', () => pm.response.to.have.status(409));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(false); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('Tidak tercatat dua kali', () => pm.expect(json.message).to.include('sudah dipindai'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Wrong Product",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"epc\": \"{{wrongProductEpc}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 409', () => pm.response.to.have.status(409));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(false); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('SKU tidak cocok', () => pm.expect(json.message).to.include('tidak sesuai'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Complete Picking",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"epc\": \"{{secondEpc}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(true); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('Progres 2/2 dan siap packing', () => { pm.expect(json.data.order.picked_qty).to.eql(2); pm.expect(json.data.order.status).to.eql('SIAP_PACKING'); pm.expect(json.data.order.lines[0].scans).to.have.length(2); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Insufficient Quantity",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{orderId}}\",\n  \"epc\": \"{{extraEpc}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 409', () => pm.response.to.have.status(409));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(false); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('Kuantitas terpenuhi', () => pm.expect(json.message).to.include('kuantitas'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST Wrong Order",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/picking/scan",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{qaToken}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"{{missingOrderId}}\",\n  \"epc\": \"{{extraEpc}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "pm.test('HTTP 404', () => pm.response.to.have.status(404));",
+              "pm.test('Envelope', () => { pm.expect(json.success).to.eql(false); pm.expect(json.message).to.be.a('string').and.not.empty; });",
+              "pm.test('Pesanan tidak ditemukan', () => pm.expect(json.message).to.include('Pesanan'));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

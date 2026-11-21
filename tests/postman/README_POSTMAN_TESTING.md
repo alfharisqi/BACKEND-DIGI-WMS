@@ -65,7 +65,7 @@ Apabila target salah, URL request diganti ke loopback port 1, request dilewati p
 1. Buka aplikasi Postman Desktop terbaru. Jika memakai versi web, aktifkan Desktop Agent agar localhost dapat diakses.
 2. Klik **Import**, pilih salah satu file `*.postman_collection.json`, lalu impor. Tidak perlu mengimpor `generate.cjs`, `scenarios.json`, atau schema JSON.
 3. Klik **Import** kembali dan pilih file environment yang pasangannya sesuai tabel di atas.
-4. Pilih environment di kanan atas. Pastikan QA menggunakan `http://127.0.0.1:5001`, sedangkan Production Read Only menggunakan `http://localhost:5000`.
+4. Pilih environment di kanan atas. Pastikan QA menggunakan `http://127.0.0.1:5001`, sedangkan Production Read Only menggunakan `http://localhost:5000`. Untuk `--serve`, isi nilai lokal `qaSession` dari file sementara yang dicetak runner. Sesi QA kedaluwarsa setelah 20 menit. Runner otomatis `--qa-only` mengisi nilai ini di memori dan tidak mengekspor token.
 5. Untuk demonstrasi GET Production, jalankan health, daftar produk, lalu detail produk. Jalankan daftar GRN sebelum detail GRN dan daftar tag sebelum detail tag. Request daftar menangkap UUID otomatis. Jika daftar kosong, detail tidak dapat diuji dan urutan berhenti; jangan menyebut detail PASS.
 6. Untuk CRUD QA, hidupkan server disposable dan jalankan **01.00 — Mulai run QA** dahulu. Request ini membuat ID run/SKU/PO/EPC baru dan mengambil identitas server. Jangan mengetik UUID seed.
 7. Buka **01.01 — CREATE produk tanpa relasi**, tab **Body → raw → JSON**, lalu **Send**. Contoh body memakai `{{qaSku}}`, nama sintetis, harga 12500.5, minimum stok 2. Response 201 menyimpan `productId`.
@@ -85,20 +85,13 @@ Apabila target salah, URL request diganti ke loopback port 1, request dilewati p
 
 ## Eksekusi otomatis dan bukti yang bisa diulang
 
-Satu perintah berikut memvalidasi schema/import SDK, menguji guard, membuat PostgreSQL disposable, menjalankan capability dan strict, memeriksa database secara langsung, menutup QA, lalu menjalankan tujuh GET Production:
-
-```powershell
-node --import tsx tests/postman/run.ts
-node tests/postman/report.cjs
-```
-
-Jika Production tidak tersedia atau hanya QA yang ingin diuji:
+Perintah otomatis memvalidasi schema Postman dan guard, menyiapkan PostgreSQL disposable, menjalankan mode capability dan strict, serta memeriksa database QA.
 
 ```powershell
 node --import tsx tests/postman/run.ts --qa-only
 ```
 
-Perintah `report.cjs` merender Markdown/HTML dari tiga file hasil terakhir, lengkap dengan waktu masing-masing. Jalankan sesudah suite penuh; setelah `--qa-only`, bukti Production lama tidak menjadi bukti pengujian ulang Production. Jangan menjalankan perintah otomatis ketika server `--serve` masih memakai port 5001. Tidak perlu mengedit `.env` atau Docker Compose. Default Production berada di port 5000 dan koleksinya tidak memiliki request atau skrip mutasi.
+Tanpa flag, runner juga memakai mode QA. Jalur terpisah dengan `--production-readonly` hanya untuk pemeriksaan baca yang sudah disetujui. `report.cjs` memerlukan bukti semua mode dan hasil lama tetap menunjukkan waktu pengujiannya sendiri. Hentikan proses `--serve` dari terminal asal sebelum menjalankan suite otomatis.
 
 Alternatif Newman CLI, dengan server `--serve` **sudah aktif** pada terminal terpisah:
 

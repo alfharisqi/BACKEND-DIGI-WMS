@@ -6,9 +6,17 @@ import dns from 'node:dns';
 
 // Memuat konfigurasi environment dari beberapa kemungkinan lokasi.
 // dotenv tidak menimpa variabel yang sudah tersedia di process.env.
-dotenv.config({ path: path.resolve(process.cwd(), '.env') });
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+const isolatedDevelopment = process.env.DIGIWMS_LOCAL_DEV === '1';
+const localDatabase = isolatedDevelopment ? require('../../scripts/dev-db.cjs') : undefined;
+const localIdentity = localDatabase?.readIdentity(process.env.DIGIWMS_DEV_IDENTITY_FILE);
+if (localIdentity) {
+  localDatabase.verifyPidFile(localIdentity);
+  process.env.JWT_SECRET = localIdentity.jwtSecret;
+} else {
+  dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+  dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+  dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+}
 
 // Mengutamakan IPv4 untuk koneksi Supabase.
 dns.setDefaultResultOrder('ipv4first');
@@ -20,7 +28,7 @@ const databaseUrl =
   'postgresql://digiwms:digiwms_pass@localhost:6543/digiwms_db';
 
 // Koneksi PostgreSQL menggunakan Supabase atau Local/Docker.
-export const db = new Pool({
+export const db = new Pool(localIdentity ? localDatabase.dbOptions(localIdentity) : {
   connectionString: databaseUrl,
   max: 15,
   idleTimeoutMillis: 30000,
@@ -506,6 +514,7 @@ export function getCalculatedLedgerStock() {
  */
 export async function checkDatabaseConnection(): Promise<boolean> {
   try {
+    if (localIdentity) await localDatabase.verifyConnection(db, localIdentity);
     const res = await db.query('SELECT NOW() AS server_time');
 
     isPostgresConnected = true;
@@ -517,6 +526,7 @@ export async function checkDatabaseConnection(): Promise<boolean> {
     return true;
   } catch (error) {
     isPostgresConnected = false;
+    if (isolatedDevelopment) throw new Error('Backend Development menolak database yang tidak terverifikasi.', { cause: error });
 
     const dbError = error as Error & {
       code?: string;
