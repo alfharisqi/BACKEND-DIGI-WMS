@@ -1,6 +1,7 @@
 
 import { FastifyInstance } from 'fastify';
 import type { PoolClient } from 'pg';
+import { randomUUID } from 'crypto';
 
 import {
   db,
@@ -256,12 +257,19 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
                 'Tidak diketahui'
               ) AS operator_name,
               SUM(sm.qty_change) OVER (
-                PARTITION BY COALESCE(sm.product_id::TEXT, sm.sku)
+                PARTITION BY COALESCE(p.id::TEXT, sm.sku)
                 ORDER BY sm.created_at ASC, sm.id ASC
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
               ) AS running_balance
             FROM stock_movements sm
-            LEFT JOIN products p ON sm.product_id = p.id
+            LEFT JOIN products p
+              ON (
+                sm.product_id = p.id
+                OR (
+                  sm.product_id IS NULL
+                  AND sm.sku = p.sku
+                )
+              )
             LEFT JOIN users u ON sm.performed_by = u.id
           )
           SELECT *
@@ -310,8 +318,8 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
 
   // ==========================================================================
   // 5. POST PROSES PUTAWAY RFID
-  // Struktur disesuaikan dengan tabel Supabase yang aktif.
-  // Trigger PostgreSQL menangani validasi dan pembaruan kapasitas rak.
+  // Struktur disesuaikan dengan tabel PostgreSQL yang aktif.
+  // Status item, tag, ledger, dan kapasitas rak diperbarui dalam satu transaksi.
   // ==========================================================================
   app.post('/api/inventory/putaway', async (request, reply) => {
     const {
@@ -324,7 +332,6 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
       reference_doc?: string;
     };
 
-    // 1. Validasi input
     if (
       typeof epc !== 'string' ||
       !epc.trim() ||
@@ -363,8 +370,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
       await client.query('BEGIN');
       transactionStarted = true;
 
-      // 2. Ambil dan kunci data tag, item, dan produk.
-      // INNER JOIN memastikan EPC sudah terhubung dengan item dan produk.
+      // 1. Ambil dan kunci data RFID, item, dan produk.
       const itemResult = await client.query(
         `
         SELECT
@@ -396,7 +402,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
 
       const item = itemResult.rows[0];
 
-      // 3. Putaway hanya untuk tag dan item berstatus ENCODED.
+      // 2. Putaway hanya menerima item dan tag berstatus ENCODED.
       if (item.tag_status !== 'ENCODED' || item.item_status !== 'ENCODED') {
         const error = new Error(
           `Putaway ditolak. Status tag: ${item.tag_status}; status item: ${item.item_status}. Keduanya harus ENCODED.`
@@ -405,17 +411,9 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 4. Item harus belum memiliki lokasi.
-      if (item.location_id !== null) {
-        const error = new Error(
-          'Barang sudah memiliki lokasi penyimpanan.'
-        ) as Error & { statusCode: number };
-        error.statusCode = 409;
-        throw error;
-      }
-
-      // 5. Ambil dan kunci lokasi tujuan berdasarkan locations.code.
-      const locationResult = await client.query(
+      // 3. Kunci lokasi transit INB01 dan lokasi rak tujuan.
+      // Penguncian berdasarkan ID menjaga urutan lock tetap konsisten.
+      const locationsResult = await client.query(
         `
         SELECT
           id,
@@ -427,23 +425,42 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           capacity_status,
           location_type
         FROM locations
-        WHERE code = $1
+        WHERE code IN ('INB01', $1)
+        ORDER BY id
         FOR UPDATE
         `,
         [location_code.trim().toUpperCase()]
       );
 
-      if (locationResult.rows.length === 0) {
-        const error = new Error('Lokasi rak tidak ditemukan.') as Error & {
+      const sourceLocation = locationsResult.rows.find(
+        (location: { code: string }) => location.code === 'INB01'
+      );
+      const destinationLocation = locationsResult.rows.find(
+        (location: { code: string }) =>
+          location.code === location_code.trim().toUpperCase()
+      );
+
+      if (!sourceLocation) {
+        const error = new Error('Lokasi transit INB01 tidak ditemukan.') as Error & {
+          statusCode: number;
+        };
+        error.statusCode = 500;
+        throw error;
+      }
+
+      if (!destinationLocation) {
+        const error = new Error('Lokasi rak tujuan tidak ditemukan.') as Error & {
           statusCode: number;
         };
         error.statusCode = 404;
         throw error;
       }
 
-      const location = locationResult.rows[0];
+      if (sourceLocation.location_type !== 'TRANSIT') {
+        throw new Error('Lokasi INB01 tidak memiliki tipe TRANSIT.');
+      }
 
-      if (location.location_type !== 'RACK') {
+      if (destinationLocation.location_type !== 'RACK') {
         const error = new Error(
           'Lokasi tujuan bukan rak penyimpanan (RACK).'
         ) as Error & { statusCode: number };
@@ -451,9 +468,47 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 6. Tempatkan item pada rak.
-      // BEFORE/AFTER trigger items akan memvalidasi kapasitas dan
-      // memperbarui current_items_count serta capacity_status.
+      if (sourceLocation.id === destinationLocation.id) {
+        const error = new Error(
+          'Lokasi transit tidak dapat menjadi lokasi tujuan Putaway.'
+        ) as Error & { statusCode: number };
+        error.statusCode = 400;
+        throw error;
+      }
+
+      // 4. Pastikan item benar-benar tercatat berada di INB01.
+      if (item.location_id !== sourceLocation.id) {
+        const error = new Error(
+          item.location_id === null
+            ? 'Item belum ditempatkan di INB01. Selesaikan proses tagging dan penempatan transit terlebih dahulu.'
+            : 'Lokasi asal item bukan INB01. Putaway hanya menerima item dari lokasi transit INB01.'
+        ) as Error & { statusCode: number };
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // 5. Validasi kapasitas lokasi sumber dan tujuan.
+      const sourceCount = Number(sourceLocation.current_items_count ?? 0);
+      const destinationCount = Number(destinationLocation.current_items_count ?? 0);
+      const destinationCapacity = Number(destinationLocation.max_capacity ?? 0);
+
+      if (sourceCount <= 0) {
+        const error = new Error(
+          'Jumlah item INB01 tidak mencukupi. Periksa sinkronisasi kapasitas lokasi transit.'
+        ) as Error & { statusCode: number };
+        error.statusCode = 409;
+        throw error;
+      }
+
+      if (destinationCapacity <= 0 || destinationCount >= destinationCapacity) {
+        const error = new Error(
+          'Rak tujuan penuh atau kapasitas rak belum diatur. Silakan pilih lokasi lain.'
+        ) as Error & { statusCode: number };
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // 6. Pindahkan item dari INB01 ke rak tujuan.
       const updateItemResult = await client.query(
         `
         UPDATE items
@@ -463,16 +518,16 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           putaway_at = NOW(),
           updated_at = NOW()
         WHERE id = $2
-          AND location_id IS NULL
+          AND location_id = $3
           AND status = 'ENCODED'
         RETURNING *
         `,
-        [location.id, item.item_id]
+        [destinationLocation.id, item.item_id, sourceLocation.id]
       );
 
       if (updateItemResult.rows.length === 0) {
         const error = new Error(
-          'Item tidak dapat dipindahkan. Periksa kembali status dan lokasi item.'
+          'Item gagal dipindahkan. Status atau lokasi item telah berubah.'
         ) as Error & { statusCode: number };
         error.statusCode = 409;
         throw error;
@@ -500,8 +555,48 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 8. Catat transaksi ke stock_movements.
-      const ledgerResult = await client.query(
+      // 8. Kapasitas lokasi diperbarui otomatis oleh trigger PostgreSQL.
+      // Jangan melakukan UPDATE locations secara manual karena
+      // trg_refresh_rack_capacity menghitung ulang lokasi asal dan tujuan
+      // setelah perubahan items.location_id.
+
+      const refreshedLocations = await client.query(
+        `
+        SELECT
+          id,
+          code,
+          name,
+          location_type,
+          current_items_count,
+          max_capacity,
+          capacity_status
+        FROM locations
+        WHERE id = ANY($1::UUID[])
+        `,
+        [[sourceLocation.id, destinationLocation.id]]
+      );
+
+      const updatedSource = refreshedLocations.rows.find(
+        (location: { id: string }) => location.id === sourceLocation.id
+      );
+
+      const updatedDestination = refreshedLocations.rows.find(
+        (location: { id: string }) => location.id === destinationLocation.id
+      );
+
+      if (!updatedSource || !updatedDestination) {
+        throw new Error(
+          'Gagal membaca kapasitas lokasi setelah proses Putaway.'
+        );
+      }
+
+      // 10. Buat satu ID perpindahan dengan dua kode transaksi unik.
+      const transferId = randomUUID().replace(/-/g, '');
+      const txOut = `PUT-OUT-${transferId}`;
+      const txIn = `PUT-IN-${transferId}`;
+
+      // 11. Catat pengeluaran item dari INB01 (-1).
+      const ledgerOutResult = await client.query(
         `
         INSERT INTO stock_movements (
           tx_code,
@@ -519,57 +614,84 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           to_location_id
         )
         VALUES (
-          'PUT-' || REPLACE(gen_random_uuid()::TEXT, '-', ''),
-          'PUTAWAY',
           $1,
+          'PUTAWAY_OUT',
           $2,
           $3,
-          'Inbound / Meja Tagging',
           $4,
-          1,
-          '1 unit',
           $5,
+          'Proses Putaway',
+          -1,
+          '-1 unit',
+          $6,
           'System',
-          NULL,
-          $6
+          $7,
+          NULL
         )
         RETURNING *
         `,
         [
+          txOut,
           item.product_id,
           item.sku,
           item.tag_id,
-          location.name,
+          sourceLocation.name,
           reference_doc.trim(),
-          location.id,
+          sourceLocation.id,
         ]
       );
 
-      // 9. Commit seluruh perubahan secara atomik.
+      // 12. Catat penerimaan item pada rak tujuan (+1).
+      const ledgerInResult = await client.query(
+        `
+        INSERT INTO stock_movements (
+          tx_code,
+          movement_type,
+          product_id,
+          sku,
+          tag_id,
+          from_location,
+          to_location,
+          qty_change,
+          qty_label,
+          reference_doc,
+          performed_by_name,
+          from_location_id,
+          to_location_id
+        )
+        VALUES (
+          $1,
+          'PUTAWAY_IN',
+          $2,
+          $3,
+          $4,
+          'Proses Putaway',
+          $5,
+          1,
+          '+1 unit',
+          $6,
+          'System',
+          NULL,
+          $7
+        )
+        RETURNING *
+        `,
+        [
+          txIn,
+          item.product_id,
+          item.sku,
+          item.tag_id,
+          destinationLocation.name,
+          reference_doc.trim(),
+          destinationLocation.id,
+        ]
+      );
+
+      // 13. Commit seluruh perubahan secara atomik.
       await client.query('COMMIT');
       transactionStarted = false;
 
-      // 10. Baca kondisi rak terbaru setelah trigger database berjalan.
-      const updatedLocationResult = await db.query(
-        `
-        SELECT
-          id,
-          code,
-          zone_code,
-          name,
-          max_capacity,
-          current_items_count,
-          capacity_status,
-          location_type
-        FROM locations
-        WHERE id = $1
-        `,
-        [location.id]
-      );
-
-      const updatedLocation = updatedLocationResult.rows[0] ?? location;
-
-      // 11. Ambil ringkasan stok untuk respons dan event realtime.
+      // 14. Ambil ringkasan stok setelah commit.
       type StockRow =
         Awaited<ReturnType<typeof getAggregatedStockByProduct>>[number];
       let currentStock: StockRow | null = null;
@@ -586,17 +708,22 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         );
       }
 
-      // 12. Kirim MQTT setelah transaksi database berhasil di-commit.
+      // 15. Kirim MQTT setelah transaksi database berhasil di-commit.
       try {
         publishRealtimeEvent('wms/stock/realtime', {
           event: 'PUTAWAY_COMPLETED',
           epc: item.epc,
           sku: item.sku,
-          location_code: updatedLocation.code,
-          location_name: updatedLocation.name,
+          source_location_code: updatedSource.code,
+          destination_location_code: updatedDestination.code,
+          destination_location_name: updatedDestination.name,
           item: updateItemResult.rows[0],
-          ledgerEntry: ledgerResult.rows[0],
-          location: updatedLocation,
+          ledger: {
+            outgoing: ledgerOutResult.rows[0],
+            incoming: ledgerInResult.rows[0],
+          },
+          source_location: updatedSource,
+          destination_location: updatedDestination,
           currentStock,
         });
       } catch (mqttError) {
@@ -605,18 +732,23 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
 
       return reply.code(201).send({
         success: true,
-        message: 'Putaway berhasil. Barang sudah ditempatkan di rak.',
+        message: 'Putaway berhasil. Barang dipindahkan dari INB01 ke rak.',
         data: {
           epc: item.epc,
           sku: item.sku,
           product_name: item.product_name,
-          location_code: updatedLocation.code,
-          location_name: updatedLocation.name,
+          source_location_code: updatedSource.code,
+          destination_location_code: updatedDestination.code,
+          destination_location_name: updatedDestination.name,
           item_status: 'IN_STOCK',
           tag_status: 'IN_STOCK',
           putaway_at: updateItemResult.rows[0].putaway_at,
-          location: updatedLocation,
-          ledger: ledgerResult.rows[0],
+          source_location: updatedSource,
+          destination_location: updatedDestination,
+          ledger: {
+            outgoing: ledgerOutResult.rows[0],
+            incoming: ledgerInResult.rows[0],
+          },
           currentStock,
         },
       });
@@ -634,7 +766,6 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         code?: string;
       };
 
-      // Trigger kapasitas rak biasanya melempar P0001.
       if (error.code === 'P0001') {
         return reply.code(409).send({
           success: false,
