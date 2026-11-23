@@ -8,6 +8,7 @@ import { orang1InboundRoutes } from './modules/orang1-inbound/routes';
 import { orang1PickingRoutes } from './modules/orang1-picking/routes';
 import { orang2InventoryRoutes } from './modules/orang2-inventory/routes';
 import { orang3OpnameRoutes } from './modules/orang3-opname/routes';
+import { orang3PosRoutes } from './modules/orang3-opname/pos.routes';
 import { orang4DashboardRoutes } from './modules/orang4-dashboard/routes';
 
 const isolatedDevelopment = process.env.DIGIWMS_LOCAL_DEV === '1';
@@ -57,7 +58,11 @@ async function bootstrap() {
   await app.register(orang1PickingRoutes);
   await app.register(orang2InventoryRoutes); // Orang 2: Rak, Putaway & Stock Movement Ledger
   await app.register(orang3OpnameRoutes);    // Orang 3: Sesi Opname Handheld & Rekonsiliasi
+  await app.register(orang3PosRoutes);       // Orang 3: KASIR POS & MODUL RETUR
   await app.register(orang4DashboardRoutes); // Orang 4: Health Check, Dashboard KPI & Users
+  await app.ready();
+console.log(app.printRoutes());
+
 
   // 3. Cek Koneksi Database PostgreSQL & Inisialisasi Broker EMQX
   await checkDatabaseConnection();
