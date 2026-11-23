@@ -1,5 +1,6 @@
 import { FastifyInstance } from 'fastify';
-import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
+import { randomUUID } from 'node:crypto';
+import { db, isPostgresConnected, memoryStore } from '../../config/db';
 import { publishRealtimeEvent } from '../../config/mqtt';
 import { authenticate, requireRoles } from '../../middleware/auth';
 
@@ -22,10 +23,9 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
     async (request, reply) => {
       try {
         // 1. Mengambil data dari frontend
-        const { zone_code, scanner_device } = request.body as {
-          zone_code: string;
-          scanner_device?: string;
-        };
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const zone_code = body.zone_code;
+        const scanner_device = body.scanner_device;
 
         // 2. Mengambil identitas pengguna yang login
         const user = request.user;
@@ -52,10 +52,18 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
         }
 
         // 4. Memvalidasi zona
-        if (!zone_code || !zone_code.trim()) {
+        if (typeof zone_code !== 'string' || !zone_code.trim() || zone_code.trim().length > 80) {
           return reply.code(400).send({
             success: false,
-            message: 'Kode zona wajib diisi.',
+            message: 'Kode zona wajib diisi dan maksimal 80 karakter.',
+          });
+        }
+
+        if (scanner_device !== undefined &&
+            (typeof scanner_device !== 'string' || !scanner_device.trim() || scanner_device.length > 120)) {
+          return reply.code(400).send({
+            success: false,
+            message: 'Identitas perangkat tidak valid.',
           });
         }
 
@@ -104,8 +112,7 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
         }
 
         // 7. Membuat kode sesi
-        const sessionCode =
-          `OPN-${zone_code.trim()}-${Date.now()}`;
+        const sessionCode = `OPN-${zone_code.trim()}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
         // 8. Menyimpan sesi ke Supabase
         const sessionResult = await db.query(
@@ -126,7 +133,7 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
           [
             sessionCode,
             zone_code.trim(),
-            scanner_device || 'HANDHELD-SIM-01',
+            (typeof scanner_device === 'string' ? scanner_device.trim() : '') || 'HANDHELD-SIM-01',
             totalExpected,
             user.id,
           ]
@@ -159,28 +166,111 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // Return only zones that have eligible stock, using the same predicate as session creation.
+  app.get(
+    '/api/stocktake/zones',
+    {
+      preHandler: [
+        authenticate,
+        requireRoles('WAREHOUSE_STAFF', 'SUPERVISOR'),
+      ],
+    },
+    async (request, reply) => {
+      if (!isPostgresConnected) {
+        return reply.code(503).send({
+          success: false,
+          message: 'Daftar zona opname membutuhkan koneksi PostgreSQL.',
+        });
+      }
+
+      try {
+        const result = await db.query(`
+          SELECT
+            l.zone_code,
+            COUNT(DISTINCT t.epc)::INT AS total_expected
+          FROM items i
+          JOIN locations l ON i.location_id = l.id
+          JOIN tags t ON i.tag_id = t.id
+          WHERE i.status = 'IN_STOCK'
+            AND t.status = 'IN_STOCK'
+          GROUP BY l.zone_code
+          ORDER BY l.zone_code ASC
+        `);
+
+        return reply.send({ success: true, data: result.rows });
+      } catch (error) {
+        request.log.error(error, 'Gagal mengambil zona Stock Opname');
+        return reply.code(500).send({
+          success: false,
+          message: 'Gagal mengambil daftar zona opname.',
+        });
+      }
+    }
+  );
+
   // 1. GET Daftar Sesi Stock Opname
-  app.get('/api/stocktake/sessions', async () => {
+  app.get(
+    '/api/stocktake/sessions',
+    {
+      preHandler: [
+        authenticate,
+        requireRoles('WAREHOUSE_STAFF', 'SUPERVISOR'),
+      ],
+    },
+    async (request) => {
+      const user = request.user!;
+      const isSupervisor = ['SUPERVISOR', 'ADMIN'].includes(
+        String(user.role).toUpperCase()
+      );
+
     if (isPostgresConnected) {
-      const res = await db.query('SELECT * FROM stocktake_sessions ORDER BY created_at DESC');
+      const res = isSupervisor
+        ? await db.query('SELECT * FROM stocktake_sessions ORDER BY created_at DESC')
+        : await db.query(
+            'SELECT * FROM stocktake_sessions WHERE conducted_by = $1 ORDER BY created_at DESC',
+            [user.id]
+          );
       return { status: 'ok', success: true, data: res.rows };
     }
-    return { status: 'ok', success: true, data: memoryStore.stocktake_sessions };
-  });
+    const sessions = isSupervisor
+      ? memoryStore.stocktake_sessions
+      : memoryStore.stocktake_sessions.filter(
+          (session) => String(session.conducted_by) === String(user.id)
+        );
+    return { status: 'ok', success: true, data: sessions };
+    }
+  );
 
 // 2. POST Mengirim Hasil Scan RFID ke Sesi Stock Opname
-app.post('/api/stocktake/scan-submit', async (request, reply) => {
+app.post(
+  '/api/stocktake/scan-submit',
+  {
+    preHandler: [
+      authenticate,
+      requireRoles('WAREHOUSE_STAFF', 'SUPERVISOR'),
+    ],
+  },
+  async (request, reply) => {
   try {
-    const { session_id, scanned_epcs } = request.body as {
-      session_id: string;
-      scanned_epcs: string[];
-    };
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const session_id = body.session_id;
+    const scanned_epcs = body.scanned_epcs;
 
       // Validasi input
-if (!session_id || !Array.isArray(scanned_epcs)) {
+if (typeof session_id !== 'string' || !session_id.trim() || !Array.isArray(scanned_epcs)) {
   return reply.code(400).send({
     success: false,
     message: 'ID sesi dan daftar EPC wajib diisi.',
+  });
+}
+
+if (scanned_epcs.length > 5000 || scanned_epcs.some(
+  (epc) => typeof epc !== 'string' || !epc.trim() || epc.trim().length > 256
+)) {
+  return reply.code(400).send({
+    success: false,
+    message: 'Daftar EPC tidak valid atau melebihi batas 5000 tag.',
   });
 }
 
@@ -194,10 +284,10 @@ if (!session_id || !Array.isArray(scanned_epcs)) {
 
       // 1. Ambil sesi opname yang sudah dibuat
       const sessionResult = await db.query(
-        `SELECT id, zone_code, status
+        `SELECT id, zone_code, status, conducted_by
          FROM stocktake_sessions
          WHERE id = $1`,
-        [session_id]
+          [session_id.trim()]
       );
 
       if (sessionResult.rows.length === 0) {
@@ -209,6 +299,16 @@ if (!session_id || !Array.isArray(scanned_epcs)) {
 
       const session = sessionResult.rows[0];
 
+      const isSupervisor = ['SUPERVISOR', 'ADMIN'].includes(
+        String(request.user?.role || '').toUpperCase()
+      );
+      if (!isSupervisor && String(session.conducted_by) !== String(request.user?.id)) {
+        return reply.code(403).send({
+          success: false,
+          message: 'Anda tidak memiliki akses untuk mengirim scan ke sesi ini.',
+        });
+      }
+
       if (session.status !== 'IN_PROGRESS') {
         return reply.code(400).send({
           success: false,
@@ -219,10 +319,7 @@ if (!session_id || !Array.isArray(scanned_epcs)) {
       // 2. Hilangkan EPC duplikat
       const uniqueEpcs = [
         ...new Set(
-          scanned_epcs
-            .filter((epc) => typeof epc === 'string')
-            .map((epc) => epc.trim())
-            .filter((epc) => epc.length > 0)
+          scanned_epcs.map((epc) => epc.trim())
         ),
       ];
 
@@ -452,7 +549,8 @@ const missingCount = discrepancies.filter(
         message: 'Gagal memproses hasil scan RFID.',
       });
     }
-  });
+  }
+);
 
 
 
@@ -704,11 +802,10 @@ for (let index = 0; index < adjustments.length; index++) {
   const diffQty = adjustment.diff_qty;
   const isIncrease = diffQty > 0;
 
-  const txCode = `TX-OPN-${Date.now()}-${index + 1}`;
-
-  const movementType = isIncrease
-    ? 'Stock Adjustment - Increase'
-    : 'Stock Adjustment - Decrease';
+  // Follow Orang 2's ledger contract and the canonical movement type from
+  // the project schema. The signed qty_change carries the adjustment direction.
+  const txCode = `OPN-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
+  const movementType = 'STOCKTAKE_ADJUSTMENT';
 
   const ledgerResult = await client.query(
     `INSERT INTO stock_movements (
