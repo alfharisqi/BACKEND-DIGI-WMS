@@ -1377,8 +1377,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     });
   });
 
-  // 16. POST Pembatalan / Pencabutan Gate Pass (Status ACTIVE -> REVOKED)
-  app.post('/api/gate-passes/:code/cancel', async (request, reply) => {
+  // 16. POST & PATCH Pembatalan / Pencabutan Gate Pass (Status ACTIVE -> REVOKED)
+  // Mendukung POST (UI Gate Security) & PATCH (Integrasi Retur POS Orang 3)
+  const handleCancelGatePass = async (request: any, reply: any) => {
     const { code } = request.params as { code: string };
     const body = (request.body as Record<string, any>) || {};
     const reason = String(body.reason || 'Dibatalkan oleh petugas keamanan gerbang').trim();
@@ -1491,5 +1492,8 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       message: `Gate Pass ${revokedPass?.pass_code} berhasil dibatalkan (REVOKED).`,
       data: revokedPass,
     });
-  });
+  };
+
+  app.post('/api/gate-passes/:code/cancel', handleCancelGatePass);
+  app.patch('/api/gate-passes/:code/cancel', handleCancelGatePass);
 }
