@@ -821,7 +821,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         `;
         const params: unknown[] = [];
 
-        if (statusFilter && ['ACTIVE', 'USED', 'EXPIRED', 'CANCELLED'].includes(statusFilter)) {
+        if (statusFilter && ['ACTIVE', 'USED', 'EXPIRED', 'REVOKED', 'CANCELLED'].includes(statusFilter)) {
           params.push(statusFilter);
           sql += ` AND gp.status = $${params.length}`;
         }
@@ -1074,13 +1074,13 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       });
     }
 
-    if (pass.status === 'CANCELLED') {
+    if (pass.status === 'REVOKED' || pass.status === 'CANCELLED') {
       return reply.send({
         status: 'warn',
         success: false,
         is_valid: false,
-        verification_status: 'CANCELLED',
-        message: `PERINGATAN: Gate Pass ${pass.pass_code} telah dibatalkan!`,
+        verification_status: 'REVOKED',
+        message: `PERINGATAN: Gate Pass ${pass.pass_code} telah dibatalkan (REVOKED)! Izin keluar ditolak.`,
         data: pass,
       });
     }
@@ -1142,6 +1142,13 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
             status: 'error',
             success: false,
             message: `Gate Pass ${pass.pass_code} sudah pernah digunakan keluar!`,
+          });
+        }
+        if (pass.status === 'REVOKED' || pass.status === 'CANCELLED') {
+          return reply.code(400).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass ${pass.pass_code} telah dibatalkan (REVOKED) dan tidak boleh keluar gerbang!`,
           });
         }
 
@@ -1367,6 +1374,122 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         item_name,
         gate_id,
       },
+    });
+  });
+
+  // 16. POST Pembatalan / Pencabutan Gate Pass (Status ACTIVE -> REVOKED)
+  app.post('/api/gate-passes/:code/cancel', async (request, reply) => {
+    const { code } = request.params as { code: string };
+    const body = (request.body as Record<string, any>) || {};
+    const reason = String(body.reason || 'Dibatalkan oleh petugas keamanan gerbang').trim();
+    const cancelledBy = String(body.cancelled_by || 'Petugas Keamanan Gerbang').trim();
+
+    let revokedPass: Record<string, any> | null = null;
+
+    if (isPostgresConnected) {
+      try {
+        const findRes = await db.query(
+          `SELECT * FROM gate_passes WHERE pass_code = $1 OR reference_resi = $1 OR id::text = $1 LIMIT 1`,
+          [code]
+        );
+
+        if (findRes.rows.length === 0) {
+          return reply.code(404).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass "${code}" tidak ditemukan!`,
+          });
+        }
+
+        const pass = findRes.rows[0];
+        if (pass.status === 'USED') {
+          return reply.code(400).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass ${pass.pass_code} sudah digunakan keluar gerbang dan tidak dapat dibatalkan!`,
+          });
+        }
+        if (pass.status === 'REVOKED') {
+          return reply.code(400).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass ${pass.pass_code} sudah berstatus dibatalkan (REVOKED).`,
+          });
+        }
+
+        const updateRes = await db.query(
+          `UPDATE gate_passes SET status = 'REVOKED' WHERE id = $1 RETURNING *`,
+          [pass.id]
+        );
+        revokedPass = updateRes.rows[0];
+      } catch (err: any) {
+        console.error('[Orang 4 Gate Pass Cancel Error]:', err.message);
+        return reply.code(500).send({
+          status: 'error',
+          success: false,
+          message: `Gagal membatalkan Gate Pass: ${err.message}`,
+        });
+      }
+    } else {
+      const foundIndex = ((memoryStore.gate_passes as Array<Record<string, any>>) || []).findIndex(
+        (gp: any) => gp.pass_code === code || gp.reference_resi === code || gp.id === code
+      );
+
+      if (foundIndex === -1) {
+        return reply.code(404).send({
+          status: 'error',
+          success: false,
+          message: `Gate Pass "${code}" tidak ditemukan!`,
+        });
+      }
+
+      const pass = (memoryStore.gate_passes as Array<Record<string, any>>)[foundIndex];
+      if (pass.status === 'USED') {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: `Gate Pass ${pass.pass_code} sudah digunakan keluar gerbang dan tidak dapat dibatalkan!`,
+        });
+      }
+      if (pass.status === 'REVOKED') {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: `Gate Pass ${pass.pass_code} sudah berstatus dibatalkan (REVOKED).`,
+        });
+      }
+
+      pass.status = 'REVOKED';
+      revokedPass = pass;
+    }
+
+    memoryStore.audit_logs.unshift({
+      id: memoryStore.audit_logs.length + 1,
+      user_id: 4,
+      user_name: cancelledBy,
+      action: 'REVOKE_GATE_PASS',
+      payload: {
+        pass_code: revokedPass?.pass_code,
+        reference_resi: revokedPass?.reference_resi,
+        reason,
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    publishRealtimeEvent('wms/gate/pass', {
+      event: 'GATE_PASS_REVOKED',
+      pass_code: revokedPass?.pass_code,
+      status: 'REVOKED',
+      reason,
+      cancelled_by: cancelledBy,
+      timestamp: new Date().toISOString(),
+    });
+
+    return reply.send({
+      status: 'ok',
+      success: true,
+      message: `Gate Pass ${revokedPass?.pass_code} berhasil dibatalkan (REVOKED).`,
+      data: revokedPass,
     });
   });
 }
