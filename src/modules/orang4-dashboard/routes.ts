@@ -867,6 +867,379 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     };
   });
 
+  // 10B. GET Daftar EPC Barang yang Siap Melewati Gerbang (Dari Meja Packing & Meja Kasir POS)
+  app.get('/api/gate/ready-epcs', async () => {
+    if (!isPostgresConnected) {
+      return { status: 'ok', success: true, data: { ready: [], in_stock: [] } };
+    }
+
+    try {
+      const res = await db.query(`
+        SELECT
+          t.id AS tag_id,
+          t.epc,
+          t.status AS tag_status,
+          i.id AS item_id,
+          i.status AS item_status,
+          p.sku,
+          p.name AS product_name,
+          l.code AS rack_code,
+          COALESCE(
+            (
+              SELECT sm.reference_doc
+              FROM public.stock_movements sm
+              WHERE sm.tag_id = t.id AND sm.qty_change < 0
+              ORDER BY sm.created_at DESC
+              LIMIT 1
+            ),
+            (
+              SELECT po.order_number
+              FROM public.picking_scans ps
+              JOIN public.picking_orders po ON po.id = ps.order_id
+              WHERE ps.tag_id = t.id AND ps.released_at IS NULL
+              ORDER BY ps.scanned_at DESC
+              LIMIT 1
+            )
+          ) AS reference_doc,
+          CASE
+            WHEN EXISTS (
+              SELECT 1 FROM public.stock_movements sm
+              WHERE sm.tag_id = t.id AND sm.movement_type = 'POS_SALE'
+            ) THEN 'MEJA_KASIR_POS'
+            WHEN EXISTS (
+              SELECT 1 FROM public.picking_scans ps
+              WHERE ps.tag_id = t.id AND ps.released_at IS NULL
+            ) THEN 'MEJA_PACKING'
+            ELSE 'OUTBOUND_GUDANG'
+          END AS source_channel
+        FROM public.tags t
+        INNER JOIN public.items i ON i.tag_id = t.id
+        INNER JOIN public.products p ON p.id = i.product_id
+        LEFT JOIN public.locations l ON l.id = i.location_id
+        WHERE t.status IN ('AUTHORIZED_OUT', 'IN_STOCK', 'RESERVED')
+        ORDER BY
+          CASE WHEN t.status = 'AUTHORIZED_OUT' THEN 0 ELSE 1 END,
+          t.updated_at DESC
+      `);
+
+      const ready = res.rows.filter((r) => r.tag_status === 'AUTHORIZED_OUT');
+      const in_stock = res.rows.filter((r) => r.tag_status !== 'AUTHORIZED_OUT');
+
+      return {
+        status: 'ok',
+        success: true,
+        data: {
+          ready,
+          in_stock,
+        },
+      };
+    } catch (err: any) {
+      console.error('[Orang 4 Ready EPCs Error]:', err.message);
+      return { status: 'error', success: false, data: { ready: [], in_stock: [] } };
+    }
+  });
+
+  // 10C. POST Sensor Antena Gerbang Membaca EPC Barang Secara Langsung (Otomatis Lolos / Alarm Breach)
+  app.post('/api/gate/scan-epc', async (request, reply) => {
+    const body = (request.body as Record<string, any>) || {};
+    const rawEpc = String(body.epc || '').trim();
+    const gate_id = String(body.gate_id || 'GATE-01');
+    const antenna_info = String(body.antenna_info || 'Antena 1 & 2 (Portal Gerbang RFID)');
+    const rssi = String(body.rssi || '-48 dBm');
+    const operator_name = String(body.operator_name || 'Sensor Antena Gerbang Otomatis');
+
+    if (!rawEpc) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: 'Kode EPC RFID barang wajib diisi!',
+      });
+    }
+
+    if (!isPostgresConnected) {
+      return reply.code(503).send({
+        status: 'error',
+        success: false,
+        message: 'Database PostgreSQL belum terhubung.',
+      });
+    }
+
+    const client = await db.connect();
+    let txStarted = false;
+
+    try {
+      await client.query('BEGIN');
+      txStarted = true;
+
+      // 1. Cari tag & item berdasarkan EPC
+      const tagRes = await client.query(
+        `SELECT
+           t.id AS tag_id,
+           t.epc,
+           t.status AS tag_status,
+           i.id AS item_id,
+           i.status AS item_status,
+           p.sku,
+           p.name AS product_name,
+           l.code AS rack_code
+         FROM public.tags t
+         LEFT JOIN public.items i ON i.tag_id = t.id
+         LEFT JOIN public.products p ON p.id = i.product_id
+         LEFT JOIN public.locations l ON l.id = i.location_id
+         WHERE t.epc = $1
+         LIMIT 1
+         FOR UPDATE OF t`,
+        [rawEpc]
+      );
+
+      if (tagRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        txStarted = false;
+        return reply.code(404).send({
+          status: 'error',
+          success: false,
+          message: `EPC "${rawEpc}" tidak terdaftar di database RFID gudang!`,
+        });
+      }
+
+      const tagRow = tagRes.rows[0];
+
+      // 2. Cek jika EPC sudah pernah keluar (EXITED)
+      if (tagRow.tag_status === 'EXITED' || tagRow.item_status === 'EXITED') {
+        await client.query('ROLLBACK');
+        txStarted = false;
+        return reply.code(409).send({
+          status: 'warn',
+          success: false,
+          gate_action: 'ALREADY_EXITED',
+          message: `Barang EPC ${rawEpc} (${tagRow.product_name || tagRow.sku}) sudah pernah keluar gerbang sebelumnya (EXITED).`,
+        });
+      }
+
+      // 3. Cek apakah EPC ini sudah diretur atau masih IN_STOCK / RESERVED (BELUM DIOTORISASI KELUAR)
+      if (tagRow.tag_status !== 'AUTHORIZED_OUT') {
+        // Picu ALARM KEAMANAN OTOMATIS karena barang melintasi gerbang tanpa selesai Kasir / Packing!
+        const eventId = crypto.randomUUID();
+        const alarmId = crypto.randomUUID();
+        const breachNote = `TERDETEKSI BARANG BELUM BAYAR / BELUM PACKING (${tagRow.tag_status} di Rak ${tagRow.rack_code || '-'}) melintasi ${gate_id}!`;
+
+        await client.query(
+          `INSERT INTO public.gate_events (
+             id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
+             direction, authorization_status, action_taken, event_time
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'UNAUTHORIZED', 'SIRENE DARURAT AKTIF - BARANG BELUM BAYAR/PACKING', NOW())`,
+          [
+            eventId,
+            gate_id,
+            rawEpc,
+            tagRow.tag_id,
+            `${tagRow.product_name || 'Barang Gudang'} (${tagRow.sku || rawEpc})`,
+            antenna_info,
+            rssi,
+          ]
+        );
+
+        await client.query(
+          `INSERT INTO public.alarms (
+             id, gate_event_id, epc, item_name, severity, siren_triggered, wa_notified, status, notes, created_at
+           )
+           VALUES ($1, $2, $3, $4, 'CRITICAL', true, false, 'ACTIVE', $5, NOW())`,
+          [
+            alarmId,
+            eventId,
+            rawEpc,
+            `${tagRow.product_name || 'Barang Gudang'} (${tagRow.sku || rawEpc})`,
+            breachNote,
+          ]
+        );
+
+        await client.query('COMMIT');
+        txStarted = false;
+
+        publishRealtimeEvent('wms/gate/alarm', {
+          event: 'SECURITY_BREACH_ALARM',
+          severity: 'CRITICAL',
+          epc: rawEpc,
+          item_name: tagRow.product_name,
+          gate_id,
+          timestamp: new Date().toISOString(),
+        });
+
+        return reply.code(403).send({
+          status: 'alarm',
+          success: false,
+          alarm_triggered: true,
+          gate_action: 'ALARM_SIREN',
+          message: `🚨 ALARM SIRINE MENYALA! Barang EPC ${rawEpc} (${tagRow.product_name}) masih berstatus ${tagRow.tag_status} (belum bayar di Kasir / belum selesai Packing)!`,
+          data: {
+            epc: rawEpc,
+            sku: tagRow.sku,
+            product_name: tagRow.product_name,
+            tag_status: tagRow.tag_status,
+            event_id: eventId,
+            alarm_id: alarmId,
+          },
+        });
+      }
+
+      // 4. EPC berstatus AUTHORIZED_OUT (Sah dari Meja Packing atau Meja Kasir POS)
+      // Cari dokumen referensinya (dari stock_movements atau picking_scans)
+      const refRes = await client.query(
+        `SELECT COALESCE(
+           (
+             SELECT sm.reference_doc
+             FROM public.stock_movements sm
+             WHERE sm.tag_id = $1 AND sm.qty_change < 0
+             ORDER BY sm.created_at DESC
+             LIMIT 1
+           ),
+           (
+             SELECT po.order_number
+             FROM public.picking_scans ps
+             JOIN public.picking_orders po ON po.id = ps.order_id
+             WHERE ps.tag_id = $1 AND ps.released_at IS NULL
+             ORDER BY ps.scanned_at DESC
+             LIMIT 1
+           )
+         ) AS reference_doc`,
+        [tagRow.tag_id]
+      );
+      const referenceDoc: string | null = refRes.rows[0]?.reference_doc || null;
+
+      // Cari atau buat Gate Pass terkait secara otomatis di belakang layar
+      let activePass: Record<string, any> | null = null;
+      if (referenceDoc) {
+        const gpRes = await client.query(
+          `SELECT * FROM public.gate_passes
+           WHERE reference_resi = $1 AND status = 'ACTIVE'
+           ORDER BY created_at DESC LIMIT 1
+           FOR UPDATE`,
+          [referenceDoc]
+        );
+        activePass = gpRes.rows[0] || null;
+      }
+
+      if (!activePass) {
+        const autoPassCode = `GP-AUTO-${Math.floor(1000 + Math.random() * 9000)}`;
+        const insertGp = await client.query(
+          `INSERT INTO public.gate_passes (pass_code, reference_resi, status, valid_until, used_at, created_at)
+           VALUES ($1, $2, 'USED', NOW() + INTERVAL '24 hours', NOW(), NOW())
+           RETURNING *`,
+          [autoPassCode, referenceDoc || `EPC-${rawEpc.slice(-6)}`]
+        );
+        activePass = insertGp.rows[0];
+      }
+
+      // Ubah status EPC ini menjadi EXITED
+      await client.query(
+        `UPDATE public.tags SET status = 'EXITED', updated_at = NOW() WHERE id = $1`,
+        [tagRow.tag_id]
+      );
+      await client.query(
+        `UPDATE public.items SET status = 'EXITED', location_id = NULL, updated_at = NOW() WHERE tag_id = $1`,
+        [tagRow.tag_id]
+      );
+
+      // Cek apakah semua EPC lain pada dokumen yang sama sudah EXITED; jika sudah, tandai Gate Pass USED & Sales SHIPPED
+      if (referenceDoc && activePass.status === 'ACTIVE') {
+        const remainingAuthRes = await client.query(
+          `SELECT COUNT(*)::int AS remaining
+           FROM public.tags t
+           WHERE t.status = 'AUTHORIZED_OUT'
+             AND (
+               EXISTS (
+                 SELECT 1 FROM public.stock_movements sm
+                 WHERE sm.tag_id = t.id AND sm.reference_doc = $1 AND sm.qty_change < 0
+               )
+               OR EXISTS (
+                 SELECT 1 FROM public.picking_scans ps
+                 JOIN public.picking_orders po ON po.id = ps.order_id
+                 WHERE ps.tag_id = t.id AND po.order_number = $1 AND ps.released_at IS NULL
+               )
+             )`,
+          [referenceDoc]
+        );
+
+        const remainingCount = Number(remainingAuthRes.rows[0]?.remaining || 0);
+        if (remainingCount === 0) {
+          const updGp = await client.query(
+            `UPDATE public.gate_passes SET status = 'USED', used_at = NOW() WHERE id = $1 RETURNING *`,
+            [activePass.id]
+          );
+          activePass = updGp.rows[0] || activePass;
+
+          await client.query(
+            `UPDATE public.sales
+             SET shipping_status = 'SHIPPED / TELAH KELUAR'
+             WHERE id = $1 OR invoice_or_resi = $2`,
+            [activePass.sale_id || null, referenceDoc]
+          );
+        }
+      }
+
+      // Catat ke gate_events
+      const eventId = crypto.randomUUID();
+      await client.query(
+        `INSERT INTO public.gate_events (
+           id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
+           direction, authorization_status, action_taken, gate_pass_id, event_time
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'AUTHORIZED_OUT', 'Lolos Sensor RFID Gerbang (Otomatis via EPC)', $8, NOW())`,
+        [
+          eventId,
+          gate_id,
+          rawEpc,
+          tagRow.tag_id,
+          `${tagRow.product_name || 'Barang'} (${referenceDoc || activePass.pass_code})`,
+          antenna_info,
+          rssi,
+          activePass.id,
+        ]
+      );
+
+      await client.query('COMMIT');
+      txStarted = false;
+
+      publishRealtimeEvent('wms/gate/exit', {
+        event: 'GATE_EXIT_CONFIRMED',
+        epc: rawEpc,
+        pass_code: activePass.pass_code,
+        reference_doc: referenceDoc,
+        gate_id,
+        operator_name,
+        timestamp: new Date().toISOString(),
+      });
+
+      return reply.send({
+        status: 'ok',
+        success: true,
+        gate_action: 'GREEN_LIGHT_OPEN',
+        message: `🟢 LAMPU HIJAU — GERBANG TERBUKA! EPC ${rawEpc} (${tagRow.product_name}) dari dokumen ${referenceDoc || activePass.pass_code} SAH & resmi keluar (EXITED).`,
+        data: {
+          epc: rawEpc,
+          sku: tagRow.sku,
+          product_name: tagRow.product_name,
+          reference_doc: referenceDoc,
+          gate_pass: activePass,
+          new_status: 'EXITED',
+        },
+      });
+    } catch (err: any) {
+      if (txStarted) {
+        await client.query('ROLLBACK').catch(() => undefined);
+      }
+      console.error('[Orang 4 Direct EPC Gate Scan Error]:', err.message);
+      return reply.code(500).send({
+        status: 'error',
+        success: false,
+        message: `Gagal memproses pembacaan EPC di gerbang: ${err.message}`,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   // 11. POST Terbitkan Gate Pass Baru (MVP 2 - Orang 4)
   app.post('/api/gate-passes/generate', async (request, reply) => {
     const body = (request.body as Record<string, any>) || {};
