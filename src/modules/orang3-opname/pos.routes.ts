@@ -60,6 +60,87 @@ export async function orang3PosRoutes(app: FastifyInstance) {
     }
   );
 
+  // 2. GET Detail Barang dan EPC berdasarkan Invoice POS
+app.get(
+  '/api/pos/sales/:invoice_no/items',
+  {
+    preHandler: [
+      authenticate,
+      requireRoles('KASIR', 'KASIR_POS', 'SUPERVISOR'),
+    ],
+  },
+  async (request, reply) => {
+    if (!isPostgresConnected) {
+      return reply.code(503).send({
+        success: false,
+        message: 'Database PostgreSQL belum terhubung.',
+      });
+    }
+
+    try {
+      const { invoice_no } = request.params as {
+        invoice_no: string;
+      };
+
+      const saleResult = await db.query(
+        `
+        SELECT id, invoice_or_resi, customer_or_destination
+        FROM public.sales
+        WHERE invoice_or_resi = $1
+          AND order_type = 'POS'
+        LIMIT 1
+        `,
+        [invoice_no]
+      );
+
+      if (saleResult.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          message: 'Invoice POS tidak ditemukan.',
+        });
+      }
+
+      const itemsResult = await db.query(
+        `
+        SELECT
+          sm.tag_id,
+          sm.product_id,
+          sm.sku,
+          t.epc,
+          t.status AS tag_status,
+          EXISTS (
+            SELECT 1
+            FROM public.stock_movements rm
+            WHERE rm.movement_type = 'RETURN_RESTOCK'
+              AND rm.reference_doc = sm.reference_doc
+              AND rm.tag_id = sm.tag_id
+          ) AS already_returned
+        FROM public.stock_movements sm
+        INNER JOIN public.tags t ON t.id = sm.tag_id
+        WHERE sm.movement_type = 'POS_SALE'
+          AND sm.reference_doc = $1
+        ORDER BY sm.created_at ASC
+        `,
+        [invoice_no]
+      );
+
+      return reply.send({
+        success: true,
+        data: {
+          invoice: saleResult.rows[0],
+          items: itemsResult.rows,
+        },
+      });
+    } catch (error) {
+      request.log.error(error, 'Gagal mengambil detail invoice POS');
+
+      return reply.code(500).send({
+        success: false,
+        message: 'Gagal mengambil detail invoice POS.',
+      });
+    }
+  }
+);
 
   // 2. POST Scan RFID untuk POS
   app.post(
@@ -524,7 +605,572 @@ export async function orang3PosRoutes(app: FastifyInstance) {
         client.release();
       }
     }
+
   );
 
+  // 4. POST Retur Barang POS
+  app.post(
+    '/api/pos/return',
+    {
+      preHandler: [
+        authenticate,
+        requireRoles('KASIR', 'KASIR_POS', 'SUPERVISOR'),
+      ],
+    },
+    async (request, reply) => {
+      if (!isPostgresConnected) {
+        return reply.code(503).send({
+          success: false,
+          message: 'Database PostgreSQL belum terhubung.',
+        });
+      }
+
+      const body = request.body as {
+        invoice_no?: string;
+        epc?: string;
+        reason?: string;
+        target_rack?: string;
+      };
+
+      const invoiceNo = body.invoice_no?.trim();
+      const epc = body.epc?.trim();
+      const reason = body.reason?.trim();
+      const targetRack = body.target_rack?.trim();
+
+      if (!invoiceNo || !epc || !reason || !targetRack) {
+        return reply.code(400).send({
+          success: false,
+          message:
+            'Nomor invoice, EPC, alasan retur, dan rak tujuan wajib diisi.',
+        });
+      }
+
+      
+      try {
+
+
+        // Pastikan EPC tercatat dalam transaksi tersebut.
+        const itemResult = await db.query(
+          `
+          SELECT
+            sm.tag_id,
+            sm.product_id,
+            sm.sku,
+            t.epc
+          FROM public.stock_movements sm
+          INNER JOIN public.tags t ON t.id = sm.tag_id
+          WHERE sm.movement_type = 'POS_SALE'
+            AND sm.reference_doc = $1
+            AND t.epc = $2
+          LIMIT 1
+          `,
+          [invoiceNo, epc]
+        );
+
+        if (itemResult.rows.length === 0) {
+          return reply.code(404).send({
+            success: false,
+            message: 'EPC tidak ditemukan dalam transaksi POS tersebut.',
+          });
+        }
+
+        const returnedItem = itemResult.rows[0];
+
+        // Ambil seluruh EPC yang tercatat dalam invoice POS.
+        const invoiceItemsResult = await db.query(
+          `
+            SELECT
+              sm.tag_id,
+              t.epc,
+              t.status AS tag_status,
+              EXISTS (
+                SELECT 1
+                FROM public.stock_movements rm
+                WHERE rm.movement_type = 'RETURN_RESTOCK'
+                  AND rm.reference_doc = sm.reference_doc
+                  AND rm.tag_id = sm.tag_id
+              ) AS already_returned
+            FROM public.stock_movements sm
+            INNER JOIN public.tags t ON t.id = sm.tag_id
+            WHERE sm.movement_type = 'POS_SALE'
+              AND sm.reference_doc = $1
+          `,
+          [invoiceNo]
+        );
+
+
+        // Cegah EPC diretur lebih dari satu kali.
+        const duplicateResult = await db.query(
+          `
+          SELECT id
+          FROM public.stock_movements
+          WHERE movement_type = 'RETURN_RESTOCK'
+            AND reference_doc = $1
+            AND tag_id = $2
+          LIMIT 1
+          `,
+          [invoiceNo, returnedItem.tag_id]
+        );
+
+        if (duplicateResult.rows.length > 0) {
+          return reply.code(409).send({
+            success: false,
+            message: 'Barang dengan EPC tersebut sudah pernah diretur.',
+          });
+        }
+
+
+        // Validasi rak tujuan retur.
+        const rackResult = await db.query(
+          `
+          SELECT id, code, location_type
+          FROM public.locations
+          WHERE code = $1
+            AND location_type = 'RACK'
+          LIMIT 1
+          `,
+          [targetRack]
+        );
+
+        if (rackResult.rows.length === 0) {
+          return reply.code(404).send({
+            success: false,
+            message: 'Rak tujuan tidak ditemukan atau bukan lokasi rak.',
+          });
+        }
+
+        const targetLocation = rackResult.rows[0];
+
+        const user = request.user as {
+        id?: string;
+        full_name?: string;
+          };
+
+        if (!user?.id) {
+          return reply.code(401).send({
+            success: false,
+            message: 'Identitas petugas tidak ditemukan.',
+          });
+        }
+        
+        
+        // Proses restock dalam satu transaksi database.
+        const client = await db.connect();
+        let committed = false;
+        let gatePassCancelled = false;
+        let latestInvoiceItems: any = null;
+        let lockedSaleData: any = null;
+
+        try {
+          await client.query('BEGIN');
+
+          // Kunci transaksi penjualan agar retur invoice yang sama
+          // tidak diproses bersamaan.
+          // Kunci transaksi penjualan dan ambil data invoice.
+            const lockedSale = await client.query(
+              `
+              SELECT
+                id,
+                invoice_or_resi,
+                customer_or_destination
+              FROM public.sales
+              WHERE invoice_or_resi = $1
+                AND order_type = 'POS'
+              FOR UPDATE
+              `,
+              [invoiceNo]
+            );
+
+            if (lockedSale.rows.length === 0) {
+              await client.query('ROLLBACK');
+
+              return reply.code(404).send({
+                success: false,
+                message: 'Transaksi POS tidak ditemukan.',
+              });
+            }
+
+            lockedSaleData = lockedSale.rows[0];
+
+          // Ambil Gate Pass terbaru untuk invoice ini.
+          const gatePassResult = await client.query(
+            `
+            SELECT pass_code, status
+            FROM public.gate_passes
+            WHERE reference_resi = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            `,
+            [invoiceNo]
+          );
+
+          if (gatePassResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+
+            return reply.code(404).send({
+              success: false,
+              message: 'Gate Pass untuk transaksi ini tidak ditemukan.',
+            });
+          }
+
+          const gatePass = gatePassResult.rows[0];
+
+          // Validasi status Gate Pass.
+          const allowedGatePassStatuses = [
+            'ACTIVE',
+            'USED',
+            'REVOKED',
+            'EXPIRED',
+          ];
+
+          if (!allowedGatePassStatuses.includes(gatePass.status)) {
+            await client.query('ROLLBACK');
+
+            return reply.code(409).send({
+              success: false,
+              message: `Status Gate Pass ${gatePass.status} tidak dapat diproses untuk retur.`,
+            });
+          }
+          
+          // Ambil ulang status EPC setelah invoice dikunci.
+          latestInvoiceItems = await client.query(
+            `
+            SELECT
+              sm.tag_id,
+              t.epc,
+              t.status AS tag_status,
+              EXISTS (
+                SELECT 1
+                FROM public.stock_movements rm
+                WHERE rm.movement_type = 'RETURN_RESTOCK'
+                  AND rm.reference_doc = sm.reference_doc
+                  AND rm.tag_id = sm.tag_id
+              ) AS already_returned
+            FROM public.stock_movements sm
+            INNER JOIN public.tags t ON t.id = sm.tag_id
+            WHERE sm.movement_type = 'POS_SALE'
+              AND sm.reference_doc = $1
+              FOR UPDATE OF t
+            `,
+            [invoiceNo]
+          );
+
+          const remainingEpcs = latestInvoiceItems.rows
+            .filter(
+              (item: any) =>
+                !item.already_returned &&
+                item.tag_id !== returnedItem.tag_id &&
+                item.tag_status === 'AUTHORIZED_OUT'
+            )
+            .map((item: any) => item.epc);
+
+          const needsReplacementGatePass = remainingEpcs.length > 0;
+
+          // Periksa ulang retur ganda di dalam transaksi.
+          const duplicateCheck = await client.query(
+            `
+            SELECT id
+            FROM public.stock_movements
+            WHERE movement_type = 'RETURN_RESTOCK'
+              AND reference_doc = $1
+              AND tag_id = $2
+            LIMIT 1
+            `,
+            [invoiceNo, returnedItem.tag_id]
+          );
+
+          if (duplicateCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return reply.code(409).send({
+              success: false,
+              message: 'Barang ini sudah pernah diretur.',
+            });
+          }
+
+          // Kunci data RFID dan barang.
+          const currentItem = await client.query(
+            `
+            SELECT
+              t.id AS tag_id,
+              t.epc,
+              t.status AS tag_status,
+              i.id AS item_id,
+              i.status AS item_status,
+              i.location_id
+            FROM public.tags t
+            INNER JOIN public.items i ON i.tag_id = t.id
+            WHERE t.id = $1
+            FOR UPDATE OF t, i
+            `,
+            [returnedItem.tag_id]
+          );
+
+          if (currentItem.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return reply.code(404).send({
+              success: false,
+              message: 'Data barang atau RFID tidak ditemukan.',
+            });
+          }
+
+          const item = currentItem.rows[0];
+
+          if (!['AUTHORIZED_OUT', 'EXITED'].includes(item.tag_status)) {
+            await client.query('ROLLBACK');
+            return reply.code(409).send({
+              success: false,
+              message: `Status RFID ${item.tag_status} tidak sesuai untuk proses retur.`,
+            });
+          }
+
+        // Gate Pass aktif harus dibatalkan sebelum restock.
+        if (gatePass.status === 'ACTIVE') {
+          const cancelResponse = await app.inject({
+            method: 'POST',
+            url: `/api/gate-passes/${encodeURIComponent(gatePass.pass_code)}/cancel`,
+            payload: {
+              reason: 'Retur barang dari transaksi POS',
+              cancelled_by: 'Petugas POS',
+            },
+          });
+
+          let cancelResult: any;
+
+          try {
+            cancelResult = cancelResponse.json();
+          } catch {
+            cancelResult = null;
+          }
+
+          if (
+            cancelResponse.statusCode < 200 ||
+            cancelResponse.statusCode >= 300 ||
+            !cancelResult?.success
+          ) {
+            request.log.error({
+              statusCode: cancelResponse.statusCode,
+              body: cancelResponse.body,
+            }, 'Gagal membatalkan Gate Pass untuk retur POS');
+
+            await client.query('ROLLBACK');
+
+            return reply.code(502).send({
+              success: false,
+              message: 'Gate Pass gagal dibatalkan. Proses retur dihentikan.',
+            });
+          }
+          gatePassCancelled = true;
+        }
+
+          // Catat penambahan stok melalui ledger.
+          await client.query(
+            `
+            INSERT INTO public.stock_movements (
+              id,
+              tx_code,
+              movement_type,
+              product_id,
+              sku,
+              tag_id,
+              from_location,
+              to_location,
+              qty_change,
+              qty_label,
+              reference_doc,
+              performed_by_name,
+              performed_by,
+              from_location_id,
+              to_location_id
+            )
+            VALUES (
+              $1, $2, 'RETURN_RESTOCK', $3, $4, $5,
+              'POS_RETURN', $6, 1, 'UNIT', $7, $8, $9, NULL, $10
+            )
+            `,
+            [
+              randomUUID(),
+              `RETURN-${randomUUID()}`,
+              returnedItem.product_id,
+              returnedItem.sku,
+              returnedItem.tag_id,
+              targetLocation.code,
+              invoiceNo,
+              user.full_name || 'Petugas POS',
+              user.id,
+              targetLocation.id,
+            ]
+          );
+
+          // Kembalikan status RFID menjadi IN_STOCK.
+          await client.query(
+            `
+            UPDATE public.tags
+            SET status = 'IN_STOCK',
+                updated_at = NOW()
+            WHERE id = $1
+            `,
+            [returnedItem.tag_id]
+          );
+
+          // Kembalikan barang ke rak tujuan.
+          await client.query(
+            `
+            UPDATE public.items
+            SET status = 'IN_STOCK',
+                location_id = $1,
+                updated_at = NOW()
+            WHERE id = $2
+            `,
+            [targetLocation.id, item.item_id]
+          );
+
+          await client.query('COMMIT');
+          committed = true;
+
+          // Terbitkan Gate Pass pengganti untuk EPC yang masih tersisa.
+          let replacementGatePass: any = null;
+          let replacementGatePassIssued = true;
+
+          if (needsReplacementGatePass) {
+            try {
+              const replacementResponse = await app.inject({
+                method: 'POST',
+                url: '/api/gate-passes/generate',
+                payload: {
+                  sale_id: lockedSaleData.id,
+                  reference_resi: invoiceNo,
+                  reference_type: 'POS',
+                  customer_or_destination:
+                    lockedSaleData.customer_or_destination,
+                  courier: null,
+                  epc_list: remainingEpcs,
+                  authorized_by: user.id,
+                  valid_hours: 4,
+                },
+              });
+
+              try {
+                replacementGatePass = replacementResponse.json();
+              } catch {
+                replacementGatePass = null;
+              }
+
+              if (
+                replacementResponse.statusCode < 200 ||
+                replacementResponse.statusCode >= 300 ||
+                !replacementGatePass?.success
+              ) {
+                replacementGatePassIssued = false;
+
+                request.log.error({
+                  statusCode: replacementResponse.statusCode,
+                  body: replacementResponse.body,
+                }, 'Gagal menerbitkan Gate Pass pengganti untuk retur POS');
+              }
+            } catch (error) {
+              replacementGatePassIssued = false;
+
+              request.log.error(
+                error,
+                'Terjadi kesalahan saat menerbitkan Gate Pass pengganti'
+              );
+            }
+          }
+
+          return reply.send({
+            success: true,
+            message:
+            needsReplacementGatePass && !replacementGatePassIssued
+              ? 'Retur berhasil dan stok telah dikembalikan, tetapi Gate Pass pengganti gagal diterbitkan. Hubungi petugas untuk menerbitkan Gate Pass.'
+              : 'Retur berhasil dan stok telah dikembalikan.',
+            data: {
+              invoice_no: invoiceNo,
+              epc: returnedItem.epc,
+              sku: returnedItem.sku,
+              movement_type: 'RETURN_RESTOCK',
+              qty_change: 1,
+              tag_status: 'IN_STOCK',
+              item_status: 'IN_STOCK',
+              target_rack: targetLocation.code,
+              reason,
+              gate_pass_replacement_required: needsReplacementGatePass,
+              gate_pass_replacement_issued: needsReplacementGatePass
+                ? replacementGatePassIssued
+                : null,
+              gate_pass_replacement: replacementGatePass?.data || null,
+            },
+          });
+        } catch (error) {
+  if (!committed) {
+    await client.query('ROLLBACK').catch(() => undefined);
+  }
+
+  // Pulihkan Gate Pass jika pembatalan berhasil,
+  // tetapi transaksi retur gagal.
+  if (!committed && gatePassCancelled) {
+    try {
+      const recoveryEpcs = latestInvoiceItems.rows
+        .filter(
+          (item: any) =>
+            !item.already_returned &&
+            item.tag_status === 'AUTHORIZED_OUT'
+        )
+        .map((item: any) => item.epc);
+
+      if (recoveryEpcs.length > 0) {
+        const recoveryResponse = await app.inject({
+          method: 'POST',
+          url: '/api/gate-passes/generate',
+          payload: {
+            sale_id: lockedSaleData.id,
+            reference_resi: invoiceNo,
+            reference_type: 'POS',
+            customer_or_destination:
+              lockedSaleData.customer_or_destination,
+            courier: null,
+            epc_list: recoveryEpcs,
+            authorized_by: user.id,
+            valid_hours: 4,
+          },
+        });
+
+        const recoveryResult = recoveryResponse.json();
+
+        if (
+          recoveryResponse.statusCode < 200 ||
+          recoveryResponse.statusCode >= 300 ||
+          !recoveryResult?.success
+        ) {
+          request.log.error({
+            statusCode: recoveryResponse.statusCode,
+            body: recoveryResponse.body,
+          }, 'Pemulihan Gate Pass setelah kegagalan retur tidak berhasil');
+        }
+      }
+    } catch (recoveryError) {
+      request.log.error(
+        recoveryError,
+        'Terjadi kesalahan saat memulihkan Gate Pass setelah kegagalan retur'
+      );
+    }
+  }
+
+  throw error;
+} finally {
+  client.release();
+}
+
+      } catch (error) {
+        request.log.error(error, 'Gagal memvalidasi retur POS');
+
+        return reply.code(500).send({
+          success: false,
+          message: 'Terjadi kesalahan saat memvalidasi retur.',
+        });
+      }
+
+    }
+  );
 
 }
+
