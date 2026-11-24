@@ -32,7 +32,7 @@ export const db = new Pool(localIdentity ? localDatabase.dbOptions(localIdentity
   connectionString: databaseUrl,
   max: 15,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
+  connectionTimeoutMillis: 25000,
   ssl:
     databaseUrl.includes('supabase.com') ||
     databaseUrl.includes('sslmode=require')
@@ -513,42 +513,50 @@ export function getCalculatedLedgerStock() {
  * In-Memory Ledger Store sebagai fallback.
  */
 export async function checkDatabaseConnection(): Promise<boolean> {
-  try {
-    if (localIdentity) await localDatabase.verifyConnection(db, localIdentity);
-    const res = await db.query('SELECT NOW() AS server_time');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (localIdentity) await localDatabase.verifyConnection(db, localIdentity);
+      const res = await db.query('SELECT NOW() AS server_time');
 
-    isPostgresConnected = true;
+      isPostgresConnected = true;
 
-    console.log(
-      `[PostgreSQL] Terhubung ke database pada: ${res.rows[0].server_time}`
-    );
+      console.log(
+        `[PostgreSQL] Terhubung ke database pada: ${res.rows[0].server_time}`
+      );
 
-    return true;
-  } catch (error) {
-    isPostgresConnected = false;
-    if (isolatedDevelopment) throw new Error('Backend Development menolak database yang tidak terverifikasi.', { cause: error });
+      return true;
+    } catch (error) {
+      if (attempt < 3 && !isolatedDevelopment) {
+        console.warn(`[PostgreSQL] Percobaan koneksi #${attempt} timeout/gagal, mencoba ulang...`);
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      isPostgresConnected = false;
+      if (isolatedDevelopment) throw new Error('Backend Development menolak database yang tidak terverifikasi.', { cause: error });
 
-    const dbError = error as Error & {
-      code?: string;
-      address?: string;
-      port?: number | string;
-    };
+      const dbError = error as Error & {
+        code?: string;
+        address?: string;
+        port?: number | string;
+      };
 
-    console.error('[PostgreSQL] Gagal terhubung:', {
-      message: dbError.message,
-      code: dbError.code,
-      address: dbError.address,
-      port: dbError.port,
-    });
+      console.error('[PostgreSQL] Gagal terhubung:', {
+        message: dbError.message,
+        code: dbError.code,
+        address: dbError.address,
+        port: dbError.port,
+      });
 
-    console.log(
-      `[Database] PostgreSQL (${
-        process.env.DATABASE_URL?.includes('supabase')
-          ? 'Supabase Cloud'
-          : 'Local/Docker'
-      }) belum terhubung. Menggunakan In-Memory Ledger Store sebagai fallback.`
-    );
+      console.log(
+        `[Database] PostgreSQL (${
+          process.env.DATABASE_URL?.includes('supabase')
+            ? 'Supabase Cloud'
+            : 'Local/Docker'
+        }) belum terhubung. Menggunakan In-Memory Ledger Store sebagai fallback.`
+      );
 
-    return false;
+      return false;
+    }
   }
+  return false;
 }

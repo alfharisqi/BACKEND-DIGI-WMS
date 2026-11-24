@@ -29,41 +29,85 @@ export async function outboundRoutes(app: FastifyInstance) {
       }
 
       const result = await db.query(`
-        SELECT
-          po.id,
-          po.order_number,
-          po.destination,
-          po.courier,
-          po.status,
-          po.total_items,
-          po.scanned_items,
-          po.created_at,
-          po.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', pi.id,
-                'epc', pi.epc,
-                'sku', pi.sku,
-                'item_id', pi.item_id,
-                'product_id', pi.product_id,
-                'product_name', p.name,
-                'location_id', pi.location_id,
-                'location_code', l.code,
-                'location_name', l.name,
-                'is_scanned', pi.is_scanned,
-                'scanned_at', pi.scanned_at
-              )
-              ORDER BY pi.epc
-            ) FILTER (WHERE pi.id IS NOT NULL),
-            '[]'::json
-          ) AS items
-        FROM outbound_picking_orders po
-        LEFT JOIN outbound_picking_items pi ON pi.order_id = po.id
-        LEFT JOIN products p ON p.id = pi.product_id
-        LEFT JOIN locations l ON l.id = pi.location_id
-        GROUP BY po.id
-        ORDER BY po.created_at DESC
+        WITH legacy_orders AS (
+          SELECT
+            po.id,
+            po.order_number,
+            po.destination,
+            po.courier,
+            po.status,
+            po.total_items,
+            po.scanned_items,
+            po.created_at,
+            po.updated_at,
+            COALESCE(
+              json_agg(
+                json_build_object(
+                  'id', pi.id,
+                  'epc', pi.epc,
+                  'sku', pi.sku,
+                  'item_id', pi.item_id,
+                  'product_id', pi.product_id,
+                  'product_name', p.name,
+                  'location_id', pi.location_id,
+                  'location_code', l.code,
+                  'location_name', l.name,
+                  'is_scanned', pi.is_scanned,
+                  'scanned_at', pi.scanned_at
+                )
+                ORDER BY pi.epc
+              ) FILTER (WHERE pi.id IS NOT NULL),
+              '[]'::json
+            ) AS items
+          FROM outbound_picking_orders po
+          LEFT JOIN outbound_picking_items pi ON pi.order_id = po.id
+          LEFT JOIN products p ON p.id = pi.product_id
+          LEFT JOIN locations l ON l.id = pi.location_id
+          GROUP BY po.id
+        ),
+        orang1_orders AS (
+          SELECT
+            o.id,
+            o.order_number,
+            COALESCE(pack.status, o.status) AS destination,
+            'JNE Express'::text AS courier,
+            CASE
+              WHEN pack.status = 'SELESAI_PACKING' THEN 'SELESAI_PACKING'
+              ELSE o.status
+            END AS status,
+            COUNT(ps.id)::int AS total_items,
+            COUNT(ps.id)::int AS scanned_items,
+            o.created_at,
+            o.updated_at,
+            COALESCE(
+              json_agg(
+                json_build_object(
+                  'id', ps.id,
+                  'epc', ps.epc,
+                  'sku', p.sku,
+                  'item_id', ps.item_id,
+                  'product_id', ps.product_id,
+                  'product_name', p.name,
+                  'location_id', ps.location_id,
+                  'location_code', ps.location_code,
+                  'location_name', ps.location_name,
+                  'is_scanned', TRUE,
+                  'scanned_at', ps.scanned_at
+                )
+                ORDER BY ps.epc
+              ) FILTER (WHERE ps.id IS NOT NULL),
+              '[]'::json
+            ) AS items
+          FROM public.picking_orders o
+          LEFT JOIN public.picking_packing pack ON pack.order_id = o.id
+          LEFT JOIN public.picking_scans ps ON ps.order_id = o.id AND ps.released_at IS NULL
+          LEFT JOIN public.products p ON p.id = ps.product_id
+          GROUP BY o.id, pack.status
+        )
+        SELECT * FROM orang1_orders
+        UNION ALL
+        SELECT * FROM legacy_orders
+        ORDER BY created_at DESC
       `);
 
       return reply.send({
@@ -969,14 +1013,16 @@ export async function outboundRoutes(app: FastifyInstance) {
         );
       }
 
-      // 6. Barang harus sudah mendapat otorisasi sebelum keluar gudang.
+      // 6. Terima barang yang sudah diotorisasi (AUTHORIZED_OUT), sudah di-pick/pack (RESERVED),
+      // maupun stok siap kirim dari rak (IN_STOCK), lalu otomatis otorisasi untuk Gate Pass.
+      const allowedStatuses = new Set(['AUTHORIZED_OUT', 'RESERVED', 'IN_STOCK']);
       for (const item of itemResult.rows) {
         if (
-          item.tag_status !== 'AUTHORIZED_OUT' ||
-          item.item_status !== 'AUTHORIZED_OUT'
+          !allowedStatuses.has(String(item.tag_status).toUpperCase()) ||
+          !allowedStatuses.has(String(item.item_status).toUpperCase())
         ) {
           const error = new Error(
-            `EPC ${item.epc} belum diotorisasi Gate Pass. Status tag: ${item.tag_status}; status item: ${item.item_status}.`
+            `EPC ${item.epc} tidak dapat dikirim (status tag: ${item.tag_status}, status item: ${item.item_status}). Barang mungkin sudah keluar (EXITED) atau belum di-putaway.`
           ) as Error & { statusCode: number };
 
           error.statusCode = 409;
@@ -997,7 +1043,7 @@ export async function outboundRoutes(app: FastifyInstance) {
           payment_status,
           shipping_status
         )
-        VALUES ($1, 'OUTBOUND_SHIPMENT', $2, $3, $4, $5, 'PAID', 'SIAP_KIRIM')
+        VALUES ($1, 'OUTBOUND_SHIPMENT', $2, $3, $4, $5, 'PAID', 'GATE_PASS_ISSUED')
         RETURNING *
         `,
         [
@@ -1011,17 +1057,18 @@ export async function outboundRoutes(app: FastifyInstance) {
 
       const sale = saleResult.rows[0];
 
-      // Buat Gate Pass otomatis sebagai dokumen pickup ekspedisi.
-      const gatePassNumber = `GP-${randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`;
+      // Buat Gate Pass otomatis sebagai dokumen pickup ekspedisi (berlaku 24 jam).
+      const gatePassNumber = `GP-${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`;
       const gatePassResult = await client.query(
         `
         INSERT INTO public.gate_passes (
           pass_code,
           sale_id,
           reference_resi,
-          status
+          status,
+          valid_until
         )
-        VALUES ($1, $2, $3, 'ACTIVE')
+        VALUES ($1, $2, $3, 'ACTIVE', NOW() + INTERVAL '24 hours')
         RETURNING *
         `,
         [gatePassNumber, sale.id, invoice]
@@ -1030,16 +1077,16 @@ export async function outboundRoutes(app: FastifyInstance) {
 
       const ledgerEntries = [];
 
-      // 7. Ubah status barang dan catat mutasi negatif.
+      // 7. Ubah status barang & tag menjadi AUTHORIZED_OUT (siap scan-out di Gerbang RFID Orang 4)
+      // dan catat pengurangan stok ke ledger.
       for (const item of itemResult.rows) {
         const updateItem = await client.query(
           `
           UPDATE items
-          SET status = 'EXITED',
-              location_id = NULL,
+          SET status = 'AUTHORIZED_OUT',
               updated_at = NOW()
           WHERE id = $1
-            AND status = 'AUTHORIZED_OUT'
+            AND status IN ('AUTHORIZED_OUT', 'RESERVED', 'IN_STOCK')
           RETURNING id
           `,
           [item.item_id]
@@ -1054,10 +1101,10 @@ export async function outboundRoutes(app: FastifyInstance) {
         const updateTag = await client.query(
           `
           UPDATE tags
-          SET status = 'EXITED',
+          SET status = 'AUTHORIZED_OUT',
               updated_at = NOW()
           WHERE id = $1
-            AND status = 'AUTHORIZED_OUT'
+            AND status IN ('AUTHORIZED_OUT', 'RESERVED', 'IN_STOCK')
           RETURNING id
           `,
           [item.tag_id]

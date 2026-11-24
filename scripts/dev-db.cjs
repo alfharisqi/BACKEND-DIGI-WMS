@@ -20,7 +20,17 @@ if (!Number.isInteger(pgPort) || pgPort < 1024 || pgPort > 65535 || pgPort === 5
   throw new Error('DIGIWMS_DEV_PG_PORT harus merupakan port PostgreSQL Development yang valid.');
 }
 const dbName = 'digiwms_development';
-const pgBin = process.env.DIGIWMS_DEV_PG_BIN || 'C:/Program Files/PostgreSQL/16/bin';
+function resolvePgBin() {
+  if (process.env.DIGIWMS_DEV_PG_BIN) return process.env.DIGIWMS_DEV_PG_BIN;
+  for (const ver of ['16', '18', '17', '15']) {
+    const candidate = `C:/Program Files/PostgreSQL/${ver}/bin`;
+    if (fs.existsSync(path.join(candidate, 'initdb.exe')) || fs.existsSync(path.join(candidate, 'initdb'))) {
+      return candidate;
+    }
+  }
+  return 'C:/Program Files/PostgreSQL/16/bin';
+}
+const pgBin = resolvePgBin();
 const secret = () => randomBytes(32).toString('hex');
 const samePath = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -198,13 +208,80 @@ async function provision(identity) {
       await db.query(`INSERT INTO users(username,email,full_name,role,password_hash)
         VALUES('admin.dev','admin.dev@example.invalid','Admin Development','ADMIN',$1) ON CONFLICT(username) DO NOTHING`, [hash]);
     }
+    const demoHash = await bcrypt.hash('123456', 10);
+    await db.query(`
+      INSERT INTO users(username,email,full_name,role,password_hash) VALUES
+        ('admin.wms','admin.wms@digiwms.id','Budi Santoso (Admin)','ADMIN',$1),
+        ('sarah.jenkins','sarah.jenkins@digiwms.id','Sarah Jenkins','SUPERVISOR',$1),
+        ('operator.inbound','operator.inbound@digiwms.id','Andi Pratama (Inbound)','WAREHOUSE_STAFF',$1),
+        ('security.gate','security.gate@digiwms.id','Komandan Hendra (Gate)','SECURITY',$1)
+      ON CONFLICT(username) DO NOTHING
+    `, [demoHash]);
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS sales (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        invoice_or_resi text UNIQUE NOT NULL,
+        order_type text NOT NULL DEFAULT 'OUTBOUND_SHIPMENT',
+        customer_or_destination text NOT NULL,
+        courier text,
+        total_items integer NOT NULL DEFAULT 1,
+        total_amount numeric(14, 2) NOT NULL DEFAULT 0,
+        payment_status text NOT NULL DEFAULT 'PAID',
+        shipping_status text NOT NULL DEFAULT 'SIAP_KIRIM',
+        cashier_or_pic uuid REFERENCES users(id) ON DELETE SET NULL,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS gate_passes (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        pass_code text UNIQUE NOT NULL,
+        sale_id uuid REFERENCES sales(id) ON DELETE CASCADE,
+        reference_resi text,
+        authorized_by uuid REFERENCES users(id) ON DELETE SET NULL,
+        status text NOT NULL DEFAULT 'ACTIVE',
+        valid_until timestamptz,
+        used_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS alarms (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        gate_event_id uuid REFERENCES gate_events(id) ON DELETE CASCADE,
+        epc text NOT NULL,
+        item_name text NOT NULL,
+        severity text NOT NULL DEFAULT 'CRITICAL',
+        siren_triggered boolean NOT NULL DEFAULT true,
+        wa_notified boolean NOT NULL DEFAULT false,
+        status text NOT NULL DEFAULT 'ACTIVE',
+        resolved_by uuid REFERENCES users(id) ON DELETE SET NULL,
+        resolved_at timestamptz,
+        notes text,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS assets (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_code text UNIQUE NOT NULL,
+        name text NOT NULL,
+        category text NOT NULL,
+        tag_id uuid UNIQUE REFERENCES tags(id) ON DELETE SET NULL,
+        location_id uuid REFERENCES locations(id) ON DELETE SET NULL,
+        assigned_pic text,
+        condition_status text NOT NULL DEFAULT 'GOOD',
+        last_maintenance_date date,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+      INSERT INTO gate_passes (pass_code, reference_resi, status, valid_until)
+      VALUES
+        ('GP-8839-OK', 'JX-8839-2910', 'ACTIVE', now() + interval '1 day'),
+        ('GP-9921-OK', 'SPX-9921-3341', 'USED', now() + interval '1 day')
+      ON CONFLICT (pass_code) DO NOTHING;
+    `);
   } finally { await db.end(); }
 }
 
 async function startDatabase() {
   await pg('initdb', ['--version']).then(({ stdout }) => {
-    if (!/PostgreSQL\) 16\./.test(stdout)) throw new Error('Launcher membutuhkan PostgreSQL 16.');
-  }).catch(error => { if (error.code === 'ENOENT') throw new Error('PostgreSQL 16 tidak ditemukan. Set DIGIWMS_DEV_PG_BIN ke folder bin.'); throw error; });
+    if (!/PostgreSQL\) (1[5-9]|[2-9]\d)\./.test(stdout)) throw new Error('Launcher membutuhkan PostgreSQL 15+.');
+  }).catch(error => { if (error.code === 'ENOENT') throw new Error('PostgreSQL tidak ditemukan. Set DIGIWMS_DEV_PG_BIN ke folder bin.'); throw error; });
   await assertAvailable(pgPort, '127.0.0.1').catch(error => {
     if (error.code !== 'EADDRINUSE' || !fs.existsSync(identityFile)) throw error;
   });

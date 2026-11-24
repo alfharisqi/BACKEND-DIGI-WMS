@@ -43,6 +43,60 @@ export async function orang1PickingRoutes(app: FastifyInstance, options: Picking
       return failure(request, reply, error);
     }
   });
+  app.post('/api/picking/orders', async (request, reply) => {
+    try {
+      const session = pickingSession(request);
+      const body = (request.body ?? {}) as {
+        order_number?: string;
+        lines?: Array<{ product_id?: string; requested_qty?: number }>;
+      };
+      const orderNumber = String(body.order_number ?? '').trim();
+      const lines = Array.isArray(body.lines) ? body.lines : [];
+      if (!orderNumber || orderNumber.length > 80) {
+        throw new PickingError(400, 'Nomor pesanan picking wajib diisi (maks 80 karakter).');
+      }
+      if (!lines.length) {
+        throw new PickingError(400, 'Minimal 1 baris produk/SKU wajib dipilih untuk pesanan picking.');
+      }
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        const orderRes = await client.query(
+          `INSERT INTO public.picking_orders (order_number, status)
+           VALUES ($1, 'MENUNGGU_PICKING')
+           RETURNING id`,
+          [orderNumber]
+        );
+        const orderId = orderRes.rows[0].id;
+        for (const l of lines) {
+          const qty = Number(l.requested_qty ?? 1);
+          if (!l.product_id || !Number.isInteger(qty) || qty <= 0) {
+            throw new PickingError(400, 'Pilih produk dan jumlah unit yang valid (> 0).');
+          }
+          await client.query(
+            `INSERT INTO public.picking_order_lines (order_id, product_id, requested_qty)
+             VALUES ($1, $2, $3)`,
+            [orderId, l.product_id, qty]
+          );
+        }
+        await client.query('COMMIT');
+        const allOrders = await repository.orders(null, session);
+        const created = allOrders.find((o: any) => o.id === orderId) || { id: orderId, order_number: orderNumber };
+        return reply.code(201).send({
+          success: true,
+          message: `Pesanan picking ${orderNumber} berhasil dibuat!`,
+          data: created,
+        });
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      return failure(request, reply, error);
+    }
+  });
   app.post('/api/picking/scan', async (request, reply) => {
     try {
       const session = pickingSession(request);

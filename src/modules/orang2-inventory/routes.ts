@@ -479,23 +479,24 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 4. Pastikan item benar-benar tercatat berada di INB01.
-      if (item.location_id !== sourceLocation.id) {
+      // 4. Terima item yang sudah berada di INB01 maupun item baru hasil encoding meja Orang 1 (location_id === null).
+      const isFromTransit = item.location_id === sourceLocation.id;
+      const isFromEncodingDesk = item.location_id === null;
+
+      if (!isFromTransit && !isFromEncodingDesk) {
         const error = new Error(
-          item.location_id === null
-            ? 'Item belum ditempatkan di INB01. Selesaikan proses tagging dan penempatan transit terlebih dahulu.'
-            : 'Lokasi asal item bukan INB01. Putaway hanya menerima item dari lokasi transit INB01.'
+          'Lokasi asal item bukan INB01 atau Meja Tagging. Putaway hanya menerima item ENCODED baru atau dari lokasi transit INB01.'
         ) as Error & { statusCode: number };
         error.statusCode = 409;
         throw error;
       }
 
-      // 5. Validasi kapasitas lokasi sumber dan tujuan.
+      // 5. Validasi kapasitas lokasi sumber (jika dari INB01) dan rak tujuan.
       const sourceCount = Number(sourceLocation.current_items_count ?? 0);
       const destinationCount = Number(destinationLocation.current_items_count ?? 0);
       const destinationCapacity = Number(destinationLocation.max_capacity ?? 0);
 
-      if (sourceCount <= 0) {
+      if (isFromTransit && sourceCount <= 0) {
         const error = new Error(
           'Jumlah item INB01 tidak mencukupi. Periksa sinkronisasi kapasitas lokasi transit.'
         ) as Error & { statusCode: number };
@@ -511,7 +512,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 6. Pindahkan item dari INB01 ke rak tujuan.
+      // 6. Pindahkan item dari INB01 / Meja Tagging ke rak tujuan.
       const updateItemResult = await client.query(
         `
         UPDATE items
@@ -521,7 +522,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           putaway_at = NOW(),
           updated_at = NOW()
         WHERE id = $2
-          AND location_id = $3
+          AND (location_id = $3 OR location_id IS NULL)
           AND status = 'ENCODED'
         RETURNING *
         `,
@@ -598,51 +599,55 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
       const txOut = `PUT-OUT-${transferId}`;
       const txIn = `PUT-IN-${transferId}`;
 
-      // 11. Catat pengeluaran item dari INB01 (-1).
-      const ledgerOutResult = await client.query(
-        `
-        INSERT INTO stock_movements (
-          tx_code,
-          movement_type,
-          product_id,
-          sku,
-          tag_id,
-          from_location,
-          to_location,
-          qty_change,
-          qty_label,
-          reference_doc,
-          performed_by_name,
-          from_location_id,
-          to_location_id
-        )
-        VALUES (
-          $1,
-          'PUTAWAY_OUT',
-          $2,
-          $3,
-          $4,
-          $5,
-          'Proses Putaway',
-          -1,
-          '-1 unit',
-          $6,
-          'System',
-          $7,
-          NULL
-        )
-        RETURNING *
-        `,
-        [
-          txOut,
-          item.product_id,
-          item.sku,
-          item.tag_id,
-          sourceLocation.name,
-          reference_doc.trim(),
-          sourceLocation.id,
-        ]
-      );
+      // 11. Catat pengeluaran item dari INB01 (-1) hanya jika item sebelumnya sudah dibukukan di INB01.
+      let ledgerOutRow = null;
+      if (isFromTransit) {
+        const ledgerOutResult = await client.query(
+          `
+          INSERT INTO stock_movements (
+            tx_code,
+            movement_type,
+            product_id,
+            sku,
+            tag_id,
+            from_location,
+            to_location,
+            qty_change,
+            qty_label,
+            reference_doc,
+            performed_by_name,
+            from_location_id,
+            to_location_id
+          )
+          VALUES (
+            $1,
+            'PUTAWAY_OUT',
+            $2,
+            $3,
+            $4,
+            $5,
+            'Proses Putaway',
+            -1,
+            '-1 unit',
+            $6,
+            'System',
+            $7,
+            NULL
+          )
+          RETURNING *
+          `,
+          [
+            txOut,
+            item.product_id,
+            item.sku,
+            item.tag_id,
+            sourceLocation.name,
+            reference_doc.trim(),
+            sourceLocation.id,
+          ]
+        );
+        ledgerOutRow = ledgerOutResult.rows[0];
+      }
 
       // 12. Catat penerimaan item pada rak tujuan (+1).
       const ledgerInResult = await client.query(
@@ -668,14 +673,14 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           $2,
           $3,
           $4,
-          'Proses Putaway',
           $5,
+          $6,
           1,
           '+1 unit',
-          $6,
+          $7,
           'System',
-          NULL,
-          $7
+          $8,
+          $9
         )
         RETURNING *
         `,
@@ -684,8 +689,10 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           item.product_id,
           item.sku,
           item.tag_id,
+          isFromTransit ? 'Proses Putaway' : sourceLocation.name,
           destinationLocation.name,
           reference_doc.trim(),
+          isFromTransit ? null : sourceLocation.id,
           destinationLocation.id,
         ]
       );
@@ -722,7 +729,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           destination_location_name: updatedDestination.name,
           item: updateItemResult.rows[0],
           ledger: {
-            outgoing: ledgerOutResult.rows[0],
+            outgoing: ledgerOutRow,
             incoming: ledgerInResult.rows[0],
           },
           source_location: updatedSource,
@@ -749,7 +756,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           source_location: updatedSource,
           destination_location: updatedDestination,
           ledger: {
-            outgoing: ledgerOutResult.rows[0],
+            outgoing: ledgerOutRow,
             incoming: ledgerInResult.rows[0],
           },
           currentStock,

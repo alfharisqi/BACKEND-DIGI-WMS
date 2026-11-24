@@ -1115,20 +1115,71 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       gate_id = 'GATE-01',
       antenna_info = 'Antena 1 & 2 (Portal Keluar)',
       rssi = '-55 dBm',
-      scanned_epcs = [],
+      scanned_epcs,
+      epc_list,
+      epcs,
+      epc,
       operator_name = 'Komandan Hendra (Gate)',
     } = body;
+
+    const rawEpcsInput = Array.isArray(scanned_epcs)
+      ? scanned_epcs
+      : Array.isArray(epc_list)
+      ? epc_list
+      : Array.isArray(epcs)
+      ? epcs
+      : typeof epc === 'string' && epc.trim()
+      ? [epc.trim()]
+      : [];
+
+    if (
+      rawEpcsInput.some(
+        (item: unknown) => typeof item !== 'string' || !item.trim()
+      )
+    ) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: 'Format daftar EPC yang dipindai tidak valid.',
+      });
+    }
+
+    const normalizedInputEpcs: string[] = rawEpcsInput.map((item: string) =>
+      item.trim()
+    );
+
+    if (new Set(normalizedInputEpcs).size !== normalizedInputEpcs.length) {
+      return reply.code(400).send({
+        status: 'error',
+        success: false,
+        message: 'Terdapat EPC duplikat dalam daftar scan-out.',
+      });
+    }
 
     let updatedPass: Record<string, any> | null = null;
 
     if (isPostgresConnected) {
+      const client = await db.connect();
+      let txStarted = false;
+
       try {
-        const findRes = await db.query(
-          `SELECT * FROM gate_passes WHERE pass_code = $1 OR reference_resi = $1 OR id::text = $1`,
+        await client.query('BEGIN');
+        txStarted = true;
+
+        // 1. Cari & kunci Gate Pass agar tidak dapat diproses paralel
+        const findRes = await client.query(
+          `SELECT *
+           FROM public.gate_passes
+           WHERE pass_code = $1 OR reference_resi = $1 OR id::text = $1
+           ORDER BY created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
           [code]
         );
 
         if (findRes.rows.length === 0) {
+          await client.query('ROLLBACK');
+          txStarted = false;
           return reply.code(404).send({
             status: 'error',
             success: false,
@@ -1137,54 +1188,364 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         }
 
         const pass = findRes.rows[0];
+
         if (pass.status === 'USED') {
-          return reply.code(400).send({
+          await client.query('ROLLBACK');
+          txStarted = false;
+          return reply.code(409).send({
             status: 'error',
             success: false,
             message: `Gate Pass ${pass.pass_code} sudah pernah digunakan keluar!`,
           });
         }
+
         if (pass.status === 'REVOKED' || pass.status === 'CANCELLED') {
-          return reply.code(400).send({
+          await client.query('ROLLBACK');
+          txStarted = false;
+          return reply.code(409).send({
             status: 'error',
             success: false,
             message: `Gate Pass ${pass.pass_code} telah dibatalkan (REVOKED) dan tidak boleh keluar gerbang!`,
           });
         }
 
-        const updateRes = await db.query(
-          `UPDATE gate_passes SET status = 'USED', used_at = NOW() WHERE id = $1 RETURNING *`,
-          [pass.id]
-        );
-        updatedPass = updateRes.rows[0];
+        if (pass.status !== 'ACTIVE') {
+          await client.query('ROLLBACK');
+          txStarted = false;
+          return reply.code(409).send({
+            status: 'error',
+            success: false,
+            message: `Gate Pass ${pass.pass_code} tidak berstatus ACTIVE (status saat ini: ${pass.status}).`,
+          });
+        }
 
-        if (Array.isArray(scanned_epcs) && scanned_epcs.length > 0) {
-          await db.query(
-            `UPDATE tags SET status = 'EXITED', updated_at = NOW() WHERE epc = ANY($1)`,
-            [scanned_epcs]
+        if (pass.valid_until && new Date(pass.valid_until) < new Date()) {
+          await client.query('ROLLBACK');
+          txStarted = false;
+          return reply.code(409).send({
+            status: 'error',
+            success: false,
+            message: `Masa berlaku Gate Pass ${pass.pass_code} sudah habis!`,
+          });
+        }
+
+        // 2. Ambil dokumen acuan transaksi (reference_resi / invoice_or_resi)
+        let referenceDoc: string | null = pass.reference_resi || null;
+        if (!referenceDoc && pass.sale_id) {
+          const saleRes = await client.query(
+            `SELECT invoice_or_resi FROM public.sales WHERE id = $1 LIMIT 1`,
+            [pass.sale_id]
+          );
+          referenceDoc = saleRes.rows[0]?.invoice_or_resi || null;
+        }
+
+        // 3. Cek daftar EPC yang terdaftar pada dokumen Gate Pass ini di stock_movements
+        const docMovementsRes = referenceDoc
+          ? await client.query(
+              `SELECT
+                 t.id AS tag_id,
+                 t.epc,
+                 SUM(CASE WHEN sm.qty_change < 0 THEN ABS(sm.qty_change) ELSE 0 END)::INT AS sold_qty,
+                 SUM(CASE WHEN sm.qty_change > 0 OR sm.movement_type ILIKE '%RETURN%' THEN ABS(sm.qty_change) ELSE 0 END)::INT AS returned_qty,
+                 SUM(sm.qty_change)::INT AS net_qty
+               FROM public.stock_movements sm
+               INNER JOIN public.tags t ON t.id = sm.tag_id
+               WHERE sm.reference_doc = $1
+               GROUP BY t.id, t.epc`,
+              [referenceDoc]
+            )
+          : { rows: [] };
+
+        const docMovementMap = new Map<
+          string,
+          { tag_id: string; epc: string; sold_qty: number; returned_qty: number; net_qty: number }
+        >();
+        for (const row of docMovementsRes.rows) {
+          docMovementMap.set(String(row.epc).trim(), {
+            tag_id: row.tag_id,
+            epc: String(row.epc).trim(),
+            sold_qty: Number(row.sold_qty || 0),
+            returned_qty: Number(row.returned_qty || 0),
+            net_qty: Number(row.net_qty || 0),
+          });
+        }
+
+        // Daftar EPC yang benar-benar sah terdaftar dan belum diretur pada Gate Pass ini
+        const activeRegisteredEpcs = Array.from(docMovementMap.values())
+          .filter((m) => m.sold_qty > 0 && m.returned_qty === 0 && m.net_qty < 0)
+          .map((m) => m.epc);
+
+        // Tentukan EPC yang akan divalidasi:
+        // - Jika caller mengirim scanned_epcs, wajib validasi seluruh EPC yang dikirim.
+        // - Jika caller tidak mengirim scanned_epcs (mis. klik cepat dari UI tanpa daftar EPC),
+        //   gunakan activeRegisteredEpcs dari dokumen Gate Pass jika dokumen tersebut tercatat di stock_movements.
+        let epcsToProcess: string[] = normalizedInputEpcs;
+        if (epcsToProcess.length === 0 && docMovementMap.size > 0) {
+          if (activeRegisteredEpcs.length === 0) {
+            await client.query('ROLLBACK');
+            txStarted = false;
+            return reply.code(409).send({
+              status: 'error',
+              success: false,
+              message: `Seluruh barang pada Gate Pass ${pass.pass_code} telah diretur atau tidak ada EPC yang sah untuk keluar gerbang.`,
+            });
+          }
+          epcsToProcess = activeRegisteredEpcs;
+        }
+
+        if (epcsToProcess.length > 0) {
+          // 4. Kunci baris tags & items untuk seluruh EPC yang dipindai
+          const tagItemsRes = await client.query(
+            `SELECT
+               t.id AS tag_id,
+               t.epc,
+               t.status AS tag_status,
+               i.id AS item_id,
+               i.status AS item_status,
+               p.name AS product_name
+             FROM public.tags t
+             LEFT JOIN public.items i ON i.tag_id = t.id
+             LEFT JOIN public.products p ON p.id = i.product_id
+             WHERE t.epc = ANY($1::text[])
+             ORDER BY t.epc
+             FOR UPDATE OF t`,
+            [epcsToProcess]
           );
 
-          for (const epc of scanned_epcs) {
-            await db.query(
-              `INSERT INTO gate_events (id, gate_id, epc, item_name, antenna_info, rssi, direction, authorization_status, action_taken, gate_pass_id, event_time)
-               VALUES ($1, $2, $3, $4, $5, $6, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $7, NOW())`,
-              [crypto.randomUUID(), gate_id, epc, `Barang Gate Pass ${pass.pass_code}`, antenna_info, rssi, pass.id]
+          const tagItemMap = new Map<string, Record<string, any>>();
+          for (const row of tagItemsRes.rows) {
+            tagItemMap.set(String(row.epc).trim(), row);
+          }
+
+          // Cek apakah sudah pernah tercatat keluar di gate_events
+          const exitedEventsRes = await client.query(
+            `SELECT DISTINCT epc
+             FROM public.gate_events
+             WHERE epc = ANY($1::text[])
+               AND direction = 'OUT'
+               AND authorization_status = 'AUTHORIZED_OUT'`,
+            [epcsToProcess]
+          );
+          const alreadyExitedEpcs = new Set(
+            exitedEventsRes.rows.map((r) => String(r.epc).trim())
+          );
+
+          for (const scannedEpc of epcsToProcess) {
+            const tagRow = tagItemMap.get(scannedEpc);
+
+            // Validasi 0: EPC harus ada di database
+            if (!tagRow) {
+              await client.query('ROLLBACK');
+              txStarted = false;
+              return reply.code(404).send({
+                status: 'error',
+                success: false,
+                message: `Scan-Out ditolak: EPC ${scannedEpc} tidak terdaftar di sistem RFID.`,
+              });
+            }
+
+            const docRecord = docMovementMap.get(scannedEpc);
+
+            // Validasi 1: Jika EPC sudah memiliki catatan retur pada dokumen ini, tolak!
+            if (docRecord && (docRecord.returned_qty > 0 || docRecord.net_qty >= 0)) {
+              await client.query('ROLLBACK');
+              txStarted = false;
+              return reply.code(409).send({
+                status: 'error',
+                success: false,
+                message: `Scan-Out ditolak: EPC ${scannedEpc} sudah diretur dan tidak terdaftar pada Gate Pass aktif ${pass.pass_code}.`,
+              });
+            }
+
+            // Validasi 2: Setiap EPC harus benar-benar terdaftar pada Gate Pass yang digunakan
+            if (docMovementMap.size > 0 && (!docRecord || docRecord.sold_qty <= 0)) {
+              await client.query('ROLLBACK');
+              txStarted = false;
+              return reply.code(409).send({
+                status: 'error',
+                success: false,
+                message: `Scan-Out ditolak: EPC ${scannedEpc} tidak terdaftar pada Gate Pass ${pass.pass_code} (${referenceDoc}).`,
+              });
+            }
+
+            // Validasi 2b: Bahkan jika Gate Pass dibuat manual tanpa stock_movements,
+            // cek apakah EPC ini milik dokumen lain atau sudah pernah diretur sebagai stok aktif
+            if (docMovementMap.size === 0 && referenceDoc) {
+              const otherDocRes = await client.query(
+                `SELECT reference_doc, movement_type
+                 FROM public.stock_movements
+                 WHERE tag_id = $1
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                [tagRow.tag_id]
+              );
+              const lastMove = otherDocRes.rows[0];
+              if (
+                lastMove &&
+                (String(lastMove.movement_type).toUpperCase().includes('RETURN') ||
+                  (lastMove.reference_doc &&
+                    lastMove.reference_doc !== referenceDoc &&
+                    ['POS_SALE', 'OUTBOUND_SHIPMENT'].includes(
+                      String(lastMove.movement_type).toUpperCase()
+                    )))
+              ) {
+                await client.query('ROLLBACK');
+                txStarted = false;
+                return reply.code(409).send({
+                  status: 'error',
+                  success: false,
+                  message: `Scan-Out ditolak: EPC ${scannedEpc} tidak terdaftar pada Gate Pass ${pass.pass_code}.`,
+                });
+              }
+            }
+
+            // Validasi 3: Pastikan EPC belum pernah digunakan untuk proses keluar (EXITED)
+            if (
+              tagRow.tag_status === 'EXITED' ||
+              tagRow.item_status === 'EXITED' ||
+              alreadyExitedEpcs.has(scannedEpc)
+            ) {
+              await client.query('ROLLBACK');
+              txStarted = false;
+              return reply.code(409).send({
+                status: 'error',
+                success: false,
+                message: `Scan-Out ditolak: EPC ${scannedEpc} sudah pernah digunakan untuk proses keluar gerbang (EXITED).`,
+              });
+            }
+
+            // Validasi 4: Tolak EPC yang statusnya IN_STOCK atau belum diotorisasi keluar
+            if (
+              tagRow.tag_status === 'IN_STOCK' ||
+              tagRow.tag_status !== 'AUTHORIZED_OUT'
+            ) {
+              await client.query('ROLLBACK');
+              txStarted = false;
+              return reply.code(409).send({
+                status: 'error',
+                success: false,
+                message: `Scan-Out ditolak: EPC ${scannedEpc} berstatus ${tagRow.tag_status} (barang masih IN_STOCK atau sudah diretur).`,
+              });
+            }
+
+            // Jika item_status IN_STOCK padahal tidak terdaftar sebagai item keluar yang sah di dokumen ini, tolak
+            if (tagRow.item_status === 'IN_STOCK' && !docRecord) {
+              await client.query('ROLLBACK');
+              txStarted = false;
+              return reply.code(409).send({
+                status: 'error',
+                success: false,
+                message: `Scan-Out ditolak: Barang dengan EPC ${scannedEpc} masih berstatus IN_STOCK di gudang dan tidak terdaftar pada Gate Pass ${pass.pass_code}.`,
+              });
+            }
+          }
+
+          // 5. Semua EPC valid -> Perbarui status Gate Pass menjadi USED
+          const updatePassRes = await client.query(
+            `UPDATE public.gate_passes
+             SET status = 'USED', used_at = NOW()
+             WHERE id = $1 AND status = 'ACTIVE'
+             RETURNING *`,
+            [pass.id]
+          );
+
+          if (updatePassRes.rows.length === 0) {
+            throw new Error(`Gagal memperbarui status Gate Pass ${pass.pass_code}.`);
+          }
+          updatedPass = updatePassRes.rows[0];
+
+          // 6. Perbarui status tags menjadi EXITED & items menjadi EXITED
+          await client.query(
+            `UPDATE public.tags
+             SET status = 'EXITED', updated_at = NOW()
+             WHERE epc = ANY($1::text[])`,
+            [epcsToProcess]
+          );
+
+          await client.query(
+            `UPDATE public.items i
+             SET status = 'EXITED',
+                 location_id = NULL,
+                 updated_at = NOW()
+             FROM public.tags t
+             WHERE i.tag_id = t.id
+               AND t.epc = ANY($1::text[])`,
+            [epcsToProcess]
+          );
+
+          // 7. Catat Gate Events dalam transaksi yang sama
+          for (const scannedEpc of epcsToProcess) {
+            const tagRow = tagItemMap.get(scannedEpc);
+            await client.query(
+              `INSERT INTO public.gate_events (
+                 id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
+                 direction, authorization_status, action_taken, gate_pass_id, event_time
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $8, NOW())`,
+              [
+                crypto.randomUUID(),
+                gate_id,
+                scannedEpc,
+                tagRow?.tag_id || null,
+                tagRow?.product_name
+                  ? `${tagRow.product_name} (${pass.pass_code})`
+                  : `Barang Gate Pass ${pass.pass_code}`,
+                antenna_info,
+                rssi,
+                pass.id,
+              ]
             );
           }
         } else {
-          await db.query(
-            `INSERT INTO gate_events (id, gate_id, epc, item_name, antenna_info, rssi, direction, authorization_status, action_taken, gate_pass_id, event_time)
+          // Fallback hanya untuk Gate Pass manual tanpa EPC sama sekali
+          const updatePassRes = await client.query(
+            `UPDATE public.gate_passes
+             SET status = 'USED', used_at = NOW()
+             WHERE id = $1 AND status = 'ACTIVE'
+             RETURNING *`,
+            [pass.id]
+          );
+          updatedPass = updatePassRes.rows[0];
+
+          await client.query(
+            `INSERT INTO public.gate_events (
+               id, gate_id, epc, item_name, antenna_info, rssi,
+               direction, authorization_status, action_taken, gate_pass_id, event_time
+             )
              VALUES ($1, $2, $3, $4, $5, $6, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $7, NOW())`,
-            [crypto.randomUUID(), gate_id, 'ALL_ITEMS', `Muatan Outbound: ${pass.reference_resi || pass.pass_code}`, antenna_info, rssi, pass.id]
+            [
+              crypto.randomUUID(),
+              gate_id,
+              'ALL_ITEMS',
+              `Muatan Outbound: ${pass.reference_resi || pass.pass_code}`,
+              antenna_info,
+              rssi,
+              pass.id,
+            ]
           );
         }
+
+        await client.query(
+          `UPDATE public.sales
+           SET shipping_status = 'SHIPPED / TELAH KELUAR'
+           WHERE id = $1 OR invoice_or_resi = $2`,
+          [pass.sale_id || null, referenceDoc || pass.reference_resi || null]
+        );
+
+        await client.query('COMMIT');
+        txStarted = false;
       } catch (err: any) {
+        if (txStarted) {
+          await client.query('ROLLBACK').catch(() => undefined);
+        }
         console.error('[Orang 4 Gate Scan-Out Error]:', err.message);
         return reply.code(500).send({
           status: 'error',
           success: false,
           message: `Gagal mencatat konfirmasi keluar gerbang: ${err.message}`,
         });
+      } finally {
+        client.release();
       }
     } else {
       const foundIndex = ((memoryStore.gate_passes as Array<Record<string, any>>) || []).findIndex(
@@ -1200,13 +1561,53 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       }
 
       const pass = (memoryStore.gate_passes as Array<Record<string, any>>)[foundIndex];
+      if (pass.status === 'USED') {
+        return reply.code(409).send({
+          status: 'error',
+          success: false,
+          message: `Gate Pass ${pass.pass_code} sudah pernah digunakan keluar!`,
+        });
+      }
+      if (pass.status === 'REVOKED' || pass.status === 'CANCELLED') {
+        return reply.code(409).send({
+          status: 'error',
+          success: false,
+          message: `Gate Pass ${pass.pass_code} telah dibatalkan (REVOKED) dan tidak boleh keluar gerbang!`,
+        });
+      }
+
+      for (const scannedEpc of normalizedInputEpcs) {
+        const tag = memoryStore.tags.find((t) => t.epc === scannedEpc);
+        if (!tag) {
+          return reply.code(404).send({
+            status: 'error',
+            success: false,
+            message: `Scan-Out ditolak: EPC ${scannedEpc} tidak terdaftar di sistem RFID.`,
+          });
+        }
+        if (tag.status === 'EXITED') {
+          return reply.code(409).send({
+            status: 'error',
+            success: false,
+            message: `Scan-Out ditolak: EPC ${scannedEpc} sudah pernah digunakan untuk proses keluar gerbang (EXITED).`,
+          });
+        }
+        if (tag.status === 'IN_STOCK' || tag.status !== 'AUTHORIZED_OUT') {
+          return reply.code(409).send({
+            status: 'error',
+            success: false,
+            message: `Scan-Out ditolak: EPC ${scannedEpc} berstatus ${tag.status} (barang masih IN_STOCK atau sudah diretur).`,
+          });
+        }
+      }
+
       pass.status = 'USED';
       pass.used_at = new Date().toISOString();
       updatedPass = pass;
 
-      if (Array.isArray(scanned_epcs) && scanned_epcs.length > 0) {
+      if (normalizedInputEpcs.length > 0) {
         memoryStore.tags.forEach((t) => {
-          if (scanned_epcs.includes(t.epc)) {
+          if (normalizedInputEpcs.includes(t.epc)) {
             t.status = 'EXITED';
           }
         });
@@ -1215,7 +1616,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       memoryStore.gate_events.unshift({
         id: crypto.randomUUID(),
         gate_id,
-        epc: scanned_epcs.join(', ') || 'ALL_ITEMS',
+        epc: normalizedInputEpcs.join(', ') || 'ALL_ITEMS',
         item_name: `Muatan Outbound: ${pass.reference_resi || pass.pass_code}`,
         antenna_info,
         rssi,
