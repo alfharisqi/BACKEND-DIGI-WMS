@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '../../config/db';
 import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
 import { generateToken, authenticate, requireRoles } from '../../middleware/auth';
+import { registerBoxRoutes } from './boxes.routes';
 
 /**
  * ============================================================================
@@ -1142,7 +1143,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       );
 
       // Cek apakah semua EPC lain pada dokumen yang sama sudah EXITED; jika sudah, tandai Gate Pass USED & Sales SHIPPED
-      if (referenceDoc && activePass.status === 'ACTIVE') {
+      if (referenceDoc && activePass?.status === 'ACTIVE') {
         const remainingAuthRes = await client.query(
           `SELECT COUNT(*)::int AS remaining
            FROM public.tags t
@@ -1162,7 +1163,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         );
 
         const remainingCount = Number(remainingAuthRes.rows[0]?.remaining || 0);
-        if (remainingCount === 0) {
+        if (remainingCount === 0 && activePass) {
           const updGp = await client.query(
             `UPDATE public.gate_passes SET status = 'USED', used_at = NOW() WHERE id = $1 RETURNING *`,
             [activePass.id]
@@ -1173,7 +1174,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
             `UPDATE public.sales
              SET shipping_status = 'SHIPPED / TELAH KELUAR'
              WHERE id = $1 OR invoice_or_resi = $2`,
-            [activePass.sale_id || null, referenceDoc]
+            [activePass?.sale_id || null, referenceDoc]
           );
         }
       }
@@ -1191,10 +1192,10 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           gate_id,
           rawEpc,
           tagRow.tag_id,
-          `${tagRow.product_name || 'Barang'} (${referenceDoc || activePass.pass_code})`,
+          `${tagRow.product_name || 'Barang'} (${referenceDoc || activePass?.pass_code || '-'})`,
           antenna_info,
           rssi,
-          activePass.id,
+          activePass?.id || null,
         ]
       );
 
@@ -1204,7 +1205,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       publishRealtimeEvent('wms/gate/exit', {
         event: 'GATE_EXIT_CONFIRMED',
         epc: rawEpc,
-        pass_code: activePass.pass_code,
+        pass_code: activePass?.pass_code || null,
         reference_doc: referenceDoc,
         gate_id,
         operator_name,
@@ -1215,7 +1216,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         status: 'ok',
         success: true,
         gate_action: 'GREEN_LIGHT_OPEN',
-        message: `🟢 LAMPU HIJAU — GERBANG TERBUKA! EPC ${rawEpc} (${tagRow.product_name}) dari dokumen ${referenceDoc || activePass.pass_code} SAH & resmi keluar (EXITED).`,
+        message: `🟢 LAMPU HIJAU — GERBANG TERBUKA! EPC ${rawEpc} (${tagRow.product_name}) dari dokumen ${referenceDoc || activePass?.pass_code || '-'} SAH & resmi keluar (EXITED).`,
         data: {
           epc: rawEpc,
           sku: tagRow.sku,
@@ -2270,4 +2271,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
   app.post('/api/gate-passes/:code/cancel', handleCancelGatePass);
   app.patch('/api/gate-passes/:code/cancel', handleCancelGatePass);
+
+  // 17. Modul Master Box / Karton & Break-Pack (Box-Level Tagging)
+  await registerBoxRoutes(app);
 }
