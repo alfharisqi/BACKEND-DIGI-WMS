@@ -78,7 +78,7 @@ test('Newman: execute all 8 requests on the attested disposable QA HTTP listener
   console.log(`Newman: ${stats.collectionRequests} request, ${stats.passed} assertion PASS, ${stats.failed} FAIL, ${stats.skipped} SKIP`);
 });
 
-test('Chrome: login, actual sidebar, rack, invalid/valid scan, packing checklist, reload and tablet', {
+test('Chrome: login, actual sidebar, rack, EPC checklist, packing checklist, reload and tablet', {
   skip: !uiDist || !existsSync(path.join(toolsDir, 'node_modules/playwright-core')) || !existsSync(chrome),
 }, async () => {
   const fixture = await qaScenario(qa.pool, 'BROWSER');
@@ -148,25 +148,26 @@ test('Chrome: login, actual sidebar, rack, invalid/valid scan, packing checklist
     await page.getByRole('combobox', { name: 'Filter status picking' }).selectOption('');
     await waitingCard.getByRole('button', { name: 'Mulai Picking' }).click();
     const dialog = page.getByRole('dialog');
-    const input = dialog.getByLabel('EPC RFID');
-    await input.waitFor();
+    const firstCandidate = dialog.getByRole('checkbox', { name: new RegExp(first.epc) });
+    const secondCandidate = dialog.getByRole('checkbox', { name: new RegExp(second.epc) });
+    await firstCandidate.waitFor();
+    assert.equal(await dialog.getByRole('checkbox', { name: new RegExp(wrong.epc) }).count(), 0);
+    assert.equal(await dialog.getByRole('textbox').count(), 0);
     await waitingCard.waitFor();
-    steps.push('Pencarian SKU, filter status dan Mulai Picking membuka input tanpa memindahkan kartu');
+    steps.push('Pencarian SKU, filter status dan Mulai Picking menampilkan kandidat SKU tanpa memindahkan kartu');
 
-    await input.fill(wrong.epc);
-    await dialog.getByRole('button', { name: 'Validasi Scan' }).click();
-    await dialog.getByRole('alert').getByText(/tidak sesuai/).waitFor();
     assert.match(await dialog.innerText(), /0\/2/);
-    await input.fill(first.epc);
-    await input.press('Enter');
-    await dialog.getByText('EPC cocok dan berhasil direservasi.').waitFor();
+    await firstCandidate.focus();
+    await page.keyboard.press('Space');
+    await dialog.getByRole('button', { name: 'Validasi Scan (1 EPC)', exact: true }).click();
+    await dialog.getByText('1 berhasil · 0 ditolak.', { exact: true }).waitFor();
     assert.match(await dialog.innerText(), /1\/2/);
     assert.ok(await cardIn('Sedang Diambil').count());
-    steps.push('EPC salah ditolak, input scanner keyboard diterima, progres tersimpan 1/2');
+    steps.push('EPC dapat dipilih lewat keyboard dan progres tersimpan 1/2');
 
-    await input.fill(second.epc);
-    await dialog.getByRole('button', { name: 'Validasi Scan' }).click();
-    await dialog.getByText('Semua EPC tervalidasi. Pesanan siap packing.').waitFor();
+    await secondCandidate.check();
+    await dialog.getByRole('button', { name: 'Validasi Scan (1 EPC)', exact: true }).click();
+    await dialog.getByText('2/2', { exact: true }).waitFor();
     await dialog.getByText(first.epc, { exact: true }).waitFor();
     await dialog.getByText(second.epc, { exact: true }).waitFor();
     assert.match(await dialog.innerText(), /2\/2/);

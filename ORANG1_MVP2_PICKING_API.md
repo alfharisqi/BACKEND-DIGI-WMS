@@ -1,6 +1,6 @@
 # API Picking & Packing MVP 2
 
-Kedua endpoint memakai envelope `{ success, message, data }`. Kirim JWT dari login DigiWMS sebagai `Authorization: Bearer <token>`. API menerima akun UUID dengan role ADMIN, SUPERVISOR, WAREHOUSE_STAFF, atau OPERATOR. Middleware Picking memverifikasi tanda tangan HS256 menggunakan `JWT_SECRET` yang dikonfigurasi layanan. Ketika konfigurasi tersebut tidak tersedia, permintaan dengan token mendapat 503. UI menggunakan token yang disimpan oleh halaman login existing.
+Endpoint Picking memakai envelope `{ success, message, data }`. Kirim JWT dari login DigiWMS sebagai `Authorization: Bearer <token>`. API menerima akun UUID aktif dengan role ADMIN, SUPERVISOR, WAREHOUSE_STAFF, atau OPERATOR. Middleware Picking memverifikasi tanda tangan HS256 menggunakan `JWT_SECRET` yang dikonfigurasi layanan. Ketika konfigurasi tersebut tidak tersedia, permintaan dengan token mendapat 503. UI menggunakan token yang disimpan oleh halaman login existing.
 
 ## GET /api/picking/orders
 
@@ -9,13 +9,29 @@ Tanpa filter, API mengembalikan pesanan picking pada semua tahap, diurutkan menu
 | Field | Makna |
 |---|---|
 | `id`, `order_number`, `status` | UUID pesanan, nomor bisnis, tahap Kanban |
-| `requested_qty`, `picked_qty` | Total kebutuhan dan jumlah scan tervalidasi yang tersimpan |
+| `requested_qty`, `picked_qty` | Total kebutuhan dan jumlah scan yang reservasinya masih aktif |
 | `lines[].product_id`, `sku`, `product_name` | Identitas produk asli pada setiap baris |
 | `lines[].requested_qty`, `picked_qty` | Kebutuhan dan progres per SKU |
+| `lines[].remaining_qty` | Sisa kebutuhan per SKU, dengan minimum nol |
+| `lines[].available_qty`, `shortage_qty` | Jumlah EPC layak untuk baris aktif dan selisih terhadap sisa kebutuhan |
 | `lines[].locations[]` | Kandidat rak fisik saat baca, dengan `id`, `code`, `name`, dan `available_qty` |
 | `lines[].scans[]` | Bukti EPC, UUID scan/item/tag, snapshot kode dan nama rak, waktu, dan flag reservasi aktif |
 
-Lokasi berasal dari `items.location_id → locations.id`. Kandidat harus berupa `RACK`, memiliki tag dan item `IN_STOCK`, serta bebas reservasi aktif. Jumlah kandidat adalah ketersediaan fisik pada saat GET. Transaksi scan memeriksa ulang ketersediaan karena order lain bisa memakai unit dari rak yang sama. Rak scan yang sudah tercatat tetap terlihat sebagai histori meskipun ketersediaan saat ini berubah.
+Lokasi berasal dari `items.location_id → locations.id`. Unit yang layak terhubung dengan tag ber-EPC yang dapat divalidasi, memiliki status tag dan item `IN_STOCK`, berada di `RACK`, dan bebas reservasi aktif. Pada order tertentu, riwayat item atau tag dari order tersebut juga mengecualikan unit dari daftar pilihannya. Rak asal dan flag reservasi setiap scan tetap tersedia dalam histori.
+
+## GET /api/picking/availability
+
+Kirim `?product_id=<UUID>`. Respons `data` memuat `product_id`, `sku`, `product_name`, dan `available_qty`. Produk yang ada dapat memiliki stok nol. UUID yang salah mendapat 400 dan UUID produk yang tidak ditemukan mendapat 404.
+
+## GET /api/picking/orders/:orderId/available-epcs
+
+Respons `data` memuat `order_id` dan `lines` dari order tersebut. Tiap baris menambahkan `candidates[]` dengan `epc`, `tag_status`, `item_status`, `location_code`, dan `location_name`. Backend mengurutkan kandidat menurut kode rak lalu EPC dan mengambil maksimal `min(remaining_qty, available_qty)` per SKU. Baris yang terpenuhi dan order yang sudah `SIAP_PACKING` mengembalikan pilihan kosong.
+
+Kedua endpoint ketersediaan hanya membaca snapshot saat permintaan diproses. Scan memvalidasi ulang setiap unit saat transaksi berlangsung.
+
+## POST /api/picking/orders
+
+Kirim `order_number` sepanjang 1–80 karakter dan `lines` yang berisi minimal satu `{ product_id, requested_qty }`. Kuantitas harus berupa angka JSON bulat positif. Backend menggabungkan permintaan untuk UUID produk yang sama sebelum membandingkannya dengan ketersediaan. Stok kurang mendapat 409, dengan jumlah diminta dan jumlah tersedia pada pesan. Satu transaksi memeriksa akun dan stok lalu menyimpan header dan baris. Respons HTTP 201 memuat order baru. EPC tetap tersedia sampai transaksi scan pertama yang berhasil.
 
 ## POST /api/picking/scan
 
@@ -29,6 +45,8 @@ Lokasi berasal dari `items.location_id → locations.id`. Kandidat harus berupa 
 API memangkas spasi dan menormalkan huruf EPC menjadi kapital. Format yang diterima adalah 24 digit heksadesimal, atau format lama empat grup heksadesimal yang digunakan MVP 1. Permintaan harus cocok dengan nilai EPC yang sudah terdaftar. ID UUID dipertahankan sebagai string.
 
 Pada HTTP 200, `data.scan` mengembalikan identitas dan lokasi scan, `data.order` mengembalikan pesanan beserta progres terbaru, dan `data.tag_status` serta `data.item_status` masing-masing bernilai `RESERVED`. Scan pertama yang belum mencukupi pesanan menghasilkan `SEDANG_DIAMBIL`. Jika kebutuhan setiap SKU terpenuhi, scan terakhir menghasilkan `SIAP_PACKING`. Untuk pesanan satu unit, satu scan dapat langsung membuatnya siap packing.
+
+Penolakan bisnis yang spesifik terhadap satu EPC menyertakan `code: 'PICKING_SCAN_REJECTED'` dengan HTTP 404 atau 409. UI mengirim satu permintaan per EPC secara berurutan dan dapat meneruskan EPC berikutnya setelah penolakan yang ditandai ini. Jika terjadi kegagalan lain, UI menghentikan batch dan membaca ulang order, histori, serta kandidat. Transaksi yang telah berhasil tetap tercatat.
 
 | HTTP | Kondisi |
 |---|---|
