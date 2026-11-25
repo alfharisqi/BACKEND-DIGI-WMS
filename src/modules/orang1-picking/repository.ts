@@ -5,9 +5,44 @@ import { requireWarehouseAccount, type WarehouseSession } from '../warehouse-ses
 type Database = Pool | PoolClient;
 
 const orderView = `
-WITH selected_orders AS (
-    SELECT id, order_number, status, created_at, updated_at
-    FROM public.picking_orders
+WITH order_base AS (
+    SELECT o.id, o.order_number, o.created_at, o.updated_at,
+        CASE
+            WHEN o.status = 'SIAP_PACKING'
+                AND EXISTS (
+                    SELECT 1 FROM public.picking_scans ps
+                    WHERE ps.order_id = o.id AND ps.released_at IS NULL
+                )
+                AND NOT EXISTS (
+                    SELECT 1 FROM public.picking_scans ps
+                    JOIN public.items i ON i.id = ps.item_id
+                    WHERE ps.order_id = o.id AND ps.released_at IS NULL
+                      AND i.status NOT IN ('AUTHORIZED_OUT', 'EXITED')
+                )
+            THEN 'DIKIRIM'
+            ELSE o.status
+        END AS status,
+        CASE
+            WHEN EXISTS (
+                SELECT 1 FROM public.picking_scans ps
+                JOIN public.items i ON i.id = ps.item_id
+                WHERE ps.order_id = o.id AND ps.released_at IS NULL AND i.status = 'EXITED'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM public.picking_scans ps
+                JOIN public.items i ON i.id = ps.item_id
+                WHERE ps.order_id = o.id AND ps.released_at IS NULL AND i.status <> 'EXITED'
+            ) THEN 'EXITED'
+            WHEN EXISTS (
+                SELECT 1 FROM public.picking_scans ps
+                JOIN public.items i ON i.id = ps.item_id
+                WHERE ps.order_id = o.id AND ps.released_at IS NULL AND i.status IN ('AUTHORIZED_OUT', 'EXITED')
+            ) THEN 'AUTHORIZED_OUT'
+            ELSE NULL
+        END AS shipping_stage
+    FROM public.picking_orders o
+), selected_orders AS (
+    SELECT id, order_number, status, shipping_stage, created_at, updated_at
+    FROM order_base
     WHERE ($1::text IS NULL OR status = $1) AND ($2::uuid IS NULL OR id = $2)
 ), selected_lines AS (
     SELECT line.*
@@ -43,7 +78,7 @@ WITH selected_orders AS (
     LEFT JOIN public.users scanner ON scanner.id = s.scanned_by
     GROUP BY s.order_id, s.product_id
 )
-SELECT o.id, o.order_number, o.status, o.created_at, o.updated_at,
+SELECT o.id, o.order_number, o.status, o.shipping_stage, o.created_at, o.updated_at,
     coalesce(pack.status, 'MENUNGGU_PACKING') AS packing_status,
     sum(line.requested_qty)::float8 AS requested_qty,
     sum(coalesce(s.picked_qty, 0))::float8 AS picked_qty,
@@ -59,7 +94,7 @@ JOIN public.products p ON p.id = line.product_id
 LEFT JOIN rack_lists r ON r.product_id = line.product_id
 LEFT JOIN scan_lists s ON s.order_id = line.order_id AND s.product_id = line.product_id
 LEFT JOIN public.picking_packing pack ON pack.order_id = o.id
-GROUP BY o.id, o.order_number, o.status, o.created_at, o.updated_at, pack.status
+GROUP BY o.id, o.order_number, o.status, o.shipping_stage, o.created_at, o.updated_at, pack.status
 ORDER BY o.created_at, o.id`;
 
 export async function selectOrders(db: Database, status: PickingStatus | null, orderId: string | null) {
