@@ -10,12 +10,34 @@ function generateHexEpc(prefix = 'E280'): string {
 }
 
 const memoryBoxes: Array<Record<string, any>> = [];
+let schemaEnsured = false;
+
+async function ensureMultiLevelBoxSchema() {
+  if (schemaEnsured || !isPostgresConnected) return;
+  try {
+    await db.query(`
+      ALTER TABLE public.boxes
+        ADD COLUMN IF NOT EXISTS box_level TEXT NOT NULL DEFAULT 'INNER',
+        ADD COLUMN IF NOT EXISTS parent_box_id UUID REFERENCES public.boxes(id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS inner_box_count INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS qty_per_inner INTEGER NOT NULL DEFAULT 1;
+    `);
+    schemaEnsured = true;
+  } catch (err: any) {
+    console.error('[Box Schema Migration Warning]:', err.message);
+  }
+}
 
 export async function registerBoxRoutes(app: FastifyInstance) {
-  // 1. GET Daftar Master Box / Karton
+  // Jalankan pengecekan kolom multi-level saat route didaftarkan
+  ensureMultiLevelBoxSchema().catch(() => {});
+
+  // 1. GET Daftar Master Box & Inner Box (Multi-Level)
   app.get('/api/boxes', async (request) => {
+    await ensureMultiLevelBoxSchema();
     const query = (request.query as Record<string, string>) || {};
     const statusFilter = query.status?.toUpperCase();
+    const levelFilter = query.level?.toUpperCase();
     const search = query.search?.toLowerCase();
 
     if (isPostgresConnected) {
@@ -25,6 +47,11 @@ export async function registerBoxRoutes(app: FastifyInstance) {
             b.id,
             b.box_code,
             b.master_epc,
+            COALESCE(b.box_level, 'INNER') AS box_level,
+            b.parent_box_id,
+            pb.box_code AS parent_box_code,
+            COALESCE(b.inner_box_count, 0) AS inner_box_count,
+            COALESCE(b.qty_per_inner, b.qty_per_box) AS qty_per_inner,
             b.product_id,
             p.sku,
             p.name AS product_name,
@@ -41,6 +68,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
           FROM boxes b
           INNER JOIN products p ON p.id = b.product_id
           LEFT JOIN locations l ON l.id = b.location_id
+          LEFT JOIN boxes pb ON pb.id = b.parent_box_id
           WHERE 1=1
         `;
         const params: unknown[] = [];
@@ -48,6 +76,11 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         if (statusFilter && ['SEALED', 'IN_RACK', 'UNPACKED', 'SHIPPED'].includes(statusFilter)) {
           params.push(statusFilter);
           sql += ` AND b.status = $${params.length}`;
+        }
+
+        if (levelFilter && ['MASTER', 'INNER'].includes(levelFilter)) {
+          params.push(levelFilter);
+          sql += ` AND COALESCE(b.box_level, 'INNER') = $${params.length}`;
         }
 
         if (search) {
@@ -60,18 +93,23 @@ export async function registerBoxRoutes(app: FastifyInstance) {
           )`;
         }
 
-        sql += ` ORDER BY b.created_at DESC LIMIT 100`;
+        sql += ` ORDER BY b.created_at DESC`;
+
         const res = await db.query(sql, params);
         const rows = res.rows;
 
+        const activeRows = rows.filter((r) => r.status === 'SEALED' || r.status === 'IN_RACK');
         const summary = {
           total_boxes: rows.length,
+          master_boxes: activeRows.filter((r) => r.box_level === 'MASTER').length,
+          inner_boxes: activeRows.filter((r) => r.box_level !== 'MASTER').length,
           sealed_boxes: rows.filter((r) => r.status === 'SEALED').length,
           in_rack_boxes: rows.filter((r) => r.status === 'IN_RACK').length,
           unpacked_boxes: rows.filter((r) => r.status === 'UNPACKED').length,
-          total_units_in_active_boxes: rows
-            .filter((r) => r.status === 'SEALED' || r.status === 'IN_RACK')
-            .reduce((acc, r) => acc + Number(r.qty_per_box || 0), 0),
+          total_units_in_active_boxes: activeRows.reduce(
+            (acc, r) => acc + Number(r.qty_per_box || 0),
+            0
+          ),
         };
 
         return { status: 'ok', success: true, count: rows.length, summary, data: rows };
@@ -82,6 +120,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
 
     let list = [...memoryBoxes];
     if (statusFilter) list = list.filter((b) => b.status === statusFilter);
+    if (levelFilter) list = list.filter((b) => (b.box_level || 'INNER') === levelFilter);
     if (search) {
       list = list.filter(
         (b) =>
@@ -90,38 +129,70 @@ export async function registerBoxRoutes(app: FastifyInstance) {
           String(b.sku || '').toLowerCase().includes(search)
       );
     }
+    const activeMem = list.filter((r) => r.status === 'SEALED' || r.status === 'IN_RACK');
     return {
       status: 'ok',
       success: true,
       count: list.length,
       summary: {
         total_boxes: list.length,
+        master_boxes: activeMem.filter((r) => r.box_level === 'MASTER').length,
+        inner_boxes: activeMem.filter((r) => r.box_level !== 'MASTER').length,
         sealed_boxes: list.filter((r) => r.status === 'SEALED').length,
         in_rack_boxes: list.filter((r) => r.status === 'IN_RACK').length,
         unpacked_boxes: list.filter((r) => r.status === 'UNPACKED').length,
-        total_units_in_active_boxes: list
-          .filter((r) => r.status === 'SEALED' || r.status === 'IN_RACK')
-          .reduce((acc, r) => acc + Number(r.qty_per_box || 0), 0),
+        total_units_in_active_boxes: activeMem.reduce(
+          (acc, r) => acc + Number(r.qty_per_box || 0),
+          0
+        ),
       },
       data: list,
     };
   });
 
-  // 2. POST Terima / Daftarkan Master Box Baru (1 Master Tag = N unit produk)
+  // 2. POST Terima / Daftarkan Box Baru (Mendukung MASTER Carton -> Inner Box -> Pcs, atau INNER Box -> Pcs)
   app.post('/api/boxes', async (request, reply) => {
+    await ensureMultiLevelBoxSchema();
     const body = (request.body as Record<string, any>) || {};
     const productId = body.product_id;
-    const qtyPerBox = Number(body.qty_per_box);
+    const boxLevel = String(body.box_level || 'INNER').toUpperCase() === 'MASTER' ? 'MASTER' : 'INNER';
     const locationCode = String(body.location_code || 'INB01').trim();
     const notes = String(body.notes || '').trim() || null;
     const customEpc = String(body.master_epc || '').trim().toUpperCase();
 
-    if (!productId || !Number.isInteger(qtyPerBox) || qtyPerBox < 1 || qtyPerBox > 500) {
-      return reply.code(400).send({
-        status: 'error',
-        success: false,
-        message: 'Produk wajib dipilih dan isi per box harus angka bulat 1 - 500 unit.',
-      });
+    let innerBoxCount = 0;
+    let qtyPerInner = 1;
+    let qtyPerBox = Number(body.qty_per_box);
+
+    if (boxLevel === 'MASTER') {
+      innerBoxCount = Number(body.inner_box_count);
+      qtyPerInner = Number(body.qty_per_inner);
+      if (
+        !productId ||
+        !Number.isInteger(innerBoxCount) ||
+        innerBoxCount < 1 ||
+        innerBoxCount > 200 ||
+        !Number.isInteger(qtyPerInner) ||
+        qtyPerInner < 1 ||
+        qtyPerInner > 500
+      ) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message:
+            'Untuk Master Carton, jumlah Inner Box harus 1–200 dan isi per Inner Box harus 1–500 unit.',
+        });
+      }
+      qtyPerBox = innerBoxCount * qtyPerInner;
+    } else {
+      if (!productId || !Number.isInteger(qtyPerBox) || qtyPerBox < 1 || qtyPerBox > 500) {
+        return reply.code(400).send({
+          status: 'error',
+          success: false,
+          message: 'Produk wajib dipilih dan isi per box harus angka bulat 1 - 500 unit.',
+        });
+      }
+      qtyPerInner = qtyPerBox;
     }
 
     if (customEpc && !/^[0-9A-F]{24}$/.test(customEpc)) {
@@ -132,9 +203,10 @@ export async function registerBoxRoutes(app: FastifyInstance) {
       });
     }
 
-    const masterEpc = customEpc || generateHexEpc('E28B');
+    const masterEpc = customEpc || generateHexEpc(boxLevel === 'MASTER' ? 'E28M' : 'E28B');
     const nowTag = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const boxCode = `BOX-${nowTag}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const codePrefix = boxLevel === 'MASTER' ? 'MBOX' : 'BOX';
+    const boxCode = `${codePrefix}-${nowTag}-${Math.floor(1000 + Math.random() * 9000)}`;
 
     if (isPostgresConnected) {
       const client = await db.connect();
@@ -164,13 +236,32 @@ export async function registerBoxRoutes(app: FastifyInstance) {
 
         const boxId = crypto.randomUUID();
         const insertRes = await client.query(
-          `INSERT INTO boxes (id, box_code, master_epc, product_id, qty_per_box, location_id, status, notes, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+          `INSERT INTO boxes (
+             id, box_code, master_epc, box_level, parent_box_id, inner_box_count, qty_per_inner,
+             product_id, qty_per_box, location_id, status, notes, created_at
+           )
+           VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, NOW())
            RETURNING *`,
-          [boxId, boxCode, masterEpc, product.id, qtyPerBox, loc ? loc.id : null, initialStatus, notes]
+          [
+            boxId,
+            boxCode,
+            masterEpc,
+            boxLevel,
+            innerBoxCount,
+            qtyPerInner,
+            product.id,
+            qtyPerBox,
+            loc ? loc.id : null,
+            initialStatus,
+            notes,
+          ]
         );
 
-        // Catat penerimaan box ke buku besar stok (+qtyPerBox)
+        const qtyLabel =
+          boxLevel === 'MASTER'
+            ? `+${qtyPerBox} unit (${innerBoxCount} Inner Box × ${qtyPerInner})`
+            : `+${qtyPerBox} unit (1 Inner Box)`;
+
         await client.query(
           `INSERT INTO stock_movements (
             id, tx_code, movement_type, product_id, sku, from_location, to_location,
@@ -183,7 +274,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
             product.sku,
             loc ? `${loc.code} - ${loc.name}` : 'Staging Inbound (INB01)',
             qtyPerBox,
-            `+${qtyPerBox} unit (1 Box)`,
+            qtyLabel,
             boxCode,
             loc ? loc.id : null,
           ]
@@ -194,16 +285,24 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         publishRealtimeEvent('wms/stock/realtime', {
           event: 'MASTER_BOX_RECEIVED',
           box_code: boxCode,
+          box_level: boxLevel,
           master_epc: masterEpc,
           sku: product.sku,
           qty_per_box: qtyPerBox,
+          inner_box_count: innerBoxCount,
+          qty_per_inner: qtyPerInner,
           status: initialStatus,
         });
+
+        const msg =
+          boxLevel === 'MASTER'
+            ? `Master Carton ${boxCode} (${innerBoxCount} Inner Box × ${qtyPerInner} = ${qtyPerBox} unit ${product.sku}) berhasil didaftarkan!`
+            : `Inner Box ${boxCode} (${qtyPerBox} unit ${product.sku}) berhasil didaftarkan!`;
 
         return reply.code(201).send({
           status: 'ok',
           success: true,
-          message: `Master Box ${boxCode} (${qtyPerBox} unit ${product.sku}) berhasil didaftarkan!`,
+          message: msg,
           data: {
             ...insertRes.rows[0],
             sku: product.sku,
@@ -224,7 +323,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         return reply.code(500).send({
           status: 'error',
           success: false,
-          message: `Gagal mendaftarkan Master Box: ${err.message}`,
+          message: `Gagal mendaftarkan Box: ${err.message}`,
         });
       } finally {
         client.release();
@@ -235,6 +334,10 @@ export async function registerBoxRoutes(app: FastifyInstance) {
       id: crypto.randomUUID(),
       box_code: boxCode,
       master_epc: masterEpc,
+      box_level: boxLevel,
+      parent_box_id: null,
+      inner_box_count: innerBoxCount,
+      qty_per_inner: qtyPerInner,
       product_id: productId,
       qty_per_box: qtyPerBox,
       location_code: locationCode,
@@ -246,13 +349,14 @@ export async function registerBoxRoutes(app: FastifyInstance) {
     return reply.code(201).send({
       status: 'ok',
       success: true,
-      message: `Master Box ${boxCode} berhasil didaftarkan (mode memori).`,
+      message: `Box ${boxCode} berhasil didaftarkan (mode memori).`,
       data: memBox,
     });
   });
 
-  // 3. PATCH Putaway 1 Master Box ke Rak Penyimpanan (Pindah N unit dalam 1 klik)
+  // 3. PATCH Putaway 1 Box (Master atau Inner) ke Rak Penyimpanan
   app.patch('/api/boxes/:id/putaway', async (request, reply) => {
+    await ensureMultiLevelBoxSchema();
     const { id } = request.params as { id: string };
     const body = (request.body as Record<string, any>) || {};
     const locationCode = String(body.location_code || '').trim();
@@ -285,7 +389,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
           return reply.code(404).send({
             status: 'error',
             success: false,
-            message: 'Master Box tidak ditemukan.',
+            message: 'Box tidak ditemukan.',
           });
         }
         const box = boxRes.rows[0];
@@ -341,7 +445,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         return reply.send({
           status: 'ok',
           success: true,
-          message: `Master Box ${box.box_code} (${box.qty_per_box} unit) berhasil dipindah ke ${targetRack.code} - ${targetRack.name}!`,
+          message: `Box ${box.box_code} (${box.qty_per_box} unit) berhasil dipindah ke ${targetRack.code} - ${targetRack.name}!`,
           data: {
             ...updateRes.rows[0],
             location_code: targetRack.code,
@@ -353,7 +457,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         return reply.code(500).send({
           status: 'error',
           success: false,
-          message: `Gagal putaway Master Box: ${err.message}`,
+          message: `Gagal putaway Box: ${err.message}`,
         });
       } finally {
         client.release();
@@ -363,9 +467,13 @@ export async function registerBoxRoutes(app: FastifyInstance) {
     return reply.code(503).send({ status: 'error', success: false, message: 'Membutuhkan koneksi PostgreSQL.' });
   });
 
-  // 4. POST Break-Pack (Pecah 1 Master Box menjadi N Tag RFID Item Satuan)
+  // 4. POST Break-Pack 2-Tahap:
+  //    - MASTER Carton -> N Inner Box (masing-masing berisi qty_per_inner Pcs)
+  //    - INNER Box     -> M Tag RFID Satuan (Pcs)
   app.post('/api/boxes/:id/unpack', async (request, reply) => {
+    await ensureMultiLevelBoxSchema();
     const { id } = request.params as { id: string };
+    const body = (request.body as Record<string, any>) || {};
 
     if (isPostgresConnected) {
       const client = await db.connect();
@@ -387,7 +495,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
           return reply.code(404).send({
             status: 'error',
             success: false,
-            message: 'Master Box tidak ditemukan.',
+            message: 'Box tidak ditemukan.',
           });
         }
 
@@ -409,7 +517,81 @@ export async function registerBoxRoutes(app: FastifyInstance) {
           });
         }
 
-        // Jika box sudah di rak (IN_RACK), tag hasil pecahan langsung IN_STOCK; jika masih di staging, ENCODED
+        const isMaster = String(box.box_level || 'INNER').toUpperCase() === 'MASTER';
+        const requestedMode = String(body.mode || '').toUpperCase();
+        const unpackMode =
+          requestedMode === 'TO_UNIT'
+            ? 'TO_UNIT'
+            : isMaster && Number(box.inner_box_count || 0) > 0
+            ? 'TO_INNER'
+            : 'TO_UNIT';
+
+        // === TAHAP 1: PECAH MASTER CARTON -> INNER BOXES ===
+        if (unpackMode === 'TO_INNER') {
+          const innerCount = Number(box.inner_box_count);
+          const qtyPerInner = Number(box.qty_per_inner || Math.max(1, Math.floor(Number(box.qty_per_box) / innerCount)));
+          const childStatus = box.status === 'IN_RACK' ? 'IN_RACK' : 'SEALED';
+          const generatedBoxes: Array<Record<string, any>> = [];
+
+          for (let i = 1; i <= innerCount; i += 1) {
+            const childId = crypto.randomUUID();
+            const childEpc = generateHexEpc('E28B');
+            const seq = String(i).padStart(2, '0');
+            const childCode = `${box.box_code}-IN${seq}`;
+
+            const childRes = await client.query(
+              `INSERT INTO boxes (
+                 id, box_code, master_epc, box_level, parent_box_id, inner_box_count, qty_per_inner,
+                 product_id, qty_per_box, location_id, status, notes, created_at
+               )
+               VALUES ($1, $2, $3, 'INNER', $4, 0, $5, $6, $5, $7, $8, $9, NOW())
+               RETURNING id, box_code, master_epc, qty_per_box, status`,
+              [
+                childId,
+                childCode,
+                childEpc,
+                box.id,
+                qtyPerInner,
+                box.product_id,
+                box.location_id || null,
+                childStatus,
+                `Pecahan dari Master Carton ${box.box_code} (${seq}/${innerCount})`,
+              ]
+            );
+            generatedBoxes.push(childRes.rows[0]);
+          }
+
+          const updateBoxRes = await client.query(
+            `UPDATE boxes SET status = 'UNPACKED', unpacked_at = NOW() WHERE id = $1 RETURNING *`,
+            [box.id]
+          );
+
+          await client.query('COMMIT');
+
+          publishRealtimeEvent('wms/stock/realtime', {
+            event: 'MASTER_BOX_UNPACKED_TO_INNER',
+            box_code: box.box_code,
+            sku: box.sku,
+            generated_inner_boxes: generatedBoxes.length,
+            qty_per_inner: qtyPerInner,
+          });
+
+          return reply.send({
+            status: 'ok',
+            success: true,
+            message: `Break-Pack Tahap 1 berhasil! Master Carton ${box.box_code} dipecah menjadi ${generatedBoxes.length} Inner Box (masing-masing ${qtyPerInner} unit).`,
+            data: {
+              unpack_mode: 'TO_INNER',
+              box: updateBoxRes.rows[0],
+              target_status: childStatus,
+              generated_count: generatedBoxes.length,
+              qty_per_inner: qtyPerInner,
+              generated_boxes: generatedBoxes,
+            },
+          });
+        }
+
+        // === TAHAP 2: PECAH INNER BOX -> TAG RFID SATUAN (PCS) ===
         const targetStatus = box.status === 'IN_RACK' ? 'IN_STOCK' : 'ENCODED';
         const generatedEpcs: string[] = [];
 
@@ -472,8 +654,9 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         return reply.send({
           status: 'ok',
           success: true,
-          message: `Break-Pack berhasil! Box ${box.box_code} dipecah menjadi ${generatedEpcs.length} tag RFID satuan (${targetStatus}).`,
+          message: `Break-Pack Satuan berhasil! Box ${box.box_code} dipecah menjadi ${generatedEpcs.length} tag RFID satuan (${targetStatus}).`,
           data: {
+            unpack_mode: 'TO_UNIT',
             box: updateBoxRes.rows[0],
             target_status: targetStatus,
             generated_count: generatedEpcs.length,
@@ -485,7 +668,7 @@ export async function registerBoxRoutes(app: FastifyInstance) {
         return reply.code(500).send({
           status: 'error',
           success: false,
-          message: `Gagal memecah Master Box: ${err.message}`,
+          message: `Gagal memecah Box: ${err.message}`,
         });
       } finally {
         client.release();

@@ -512,13 +512,40 @@ export function getCalculatedLedgerStock() {
  * Jika koneksi gagal, aplikasi tetap dapat menggunakan
  * In-Memory Ledger Store sebagai fallback.
  */
+let reconnectTimer: ReturnType<typeof setInterval> | null = null;
+
+function scheduleDatabaseReconnect() {
+  if (reconnectTimer || isolatedDevelopment) return;
+  reconnectTimer = setInterval(async () => {
+    try {
+      const res = await db.query('SELECT NOW() AS server_time');
+      isPostgresConnected = true;
+      if (reconnectTimer) {
+        clearInterval(reconnectTimer);
+        reconnectTimer = null;
+      }
+      console.log(
+        `[PostgreSQL] Reconnect berhasil! Terhubung ke database pada: ${res.rows[0].server_time}`
+      );
+    } catch {
+      // Masih offline, coba lagi di interval berikutnya
+    }
+  }, 15000);
+  reconnectTimer.unref?.();
+}
+
 export async function checkDatabaseConnection(): Promise<boolean> {
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       if (localIdentity) await localDatabase.verifyConnection(db, localIdentity);
       const res = await db.query('SELECT NOW() AS server_time');
 
       isPostgresConnected = true;
+      if (reconnectTimer) {
+        clearInterval(reconnectTimer);
+        reconnectTimer = null;
+      }
 
       console.log(
         `[PostgreSQL] Terhubung ke database pada: ${res.rows[0].server_time}`
@@ -526,9 +553,10 @@ export async function checkDatabaseConnection(): Promise<boolean> {
 
       return true;
     } catch (error) {
-      if (attempt < 3 && !isolatedDevelopment) {
-        console.warn(`[PostgreSQL] Percobaan koneksi #${attempt} timeout/gagal, mencoba ulang...`);
-        await new Promise((r) => setTimeout(r, 1500));
+      if (attempt < maxAttempts && !isolatedDevelopment) {
+        const delayMs = 1500 + (attempt - 1) * 1000;
+        console.warn(`[PostgreSQL] Percobaan koneksi #${attempt} timeout/gagal, mencoba ulang dalam ${(delayMs / 1000).toFixed(1)}s...`);
+        await new Promise((r) => setTimeout(r, delayMs));
         continue;
       }
       isPostgresConnected = false;
@@ -552,9 +580,10 @@ export async function checkDatabaseConnection(): Promise<boolean> {
           process.env.DATABASE_URL?.includes('supabase')
             ? 'Supabase Cloud'
             : 'Local/Docker'
-        }) belum terhubung. Menggunakan In-Memory Ledger Store sebagai fallback.`
+        }) belum terhubung. Menggunakan In-Memory Ledger Store sebagai fallback (auto-reconnect aktif tiap 15s).`
       );
 
+      scheduleDatabaseReconnect();
       return false;
     }
   }

@@ -195,9 +195,64 @@ app.get(
         );
 
         if (result.rows.length === 0) {
-          return reply.code(404).send({
-            success: false,
-            message: 'RFID tidak ditemukan atau barang belum memiliki lokasi.',
+          // Cek apakah EPC / kode yang discan adalah Master Box atau Inner Box
+          const boxResult = await db.query(
+            `
+            SELECT
+              b.id AS box_id,
+              b.box_code,
+              b.master_epc,
+              COALESCE(b.box_level, 'INNER') AS box_level,
+              b.qty_per_box,
+              b.status AS box_status,
+              p.id AS product_id,
+              p.sku,
+              p.name AS product_name,
+              p.category,
+              p.unit_price,
+              l.code AS rack_code
+            FROM public.boxes b
+            INNER JOIN public.products p ON p.id = b.product_id
+            LEFT JOIN public.locations l ON l.id = b.location_id
+            WHERE UPPER(b.master_epc) = UPPER($1) OR UPPER(b.box_code) = UPPER($1)
+            LIMIT 1
+            `,
+            [epc.trim()]
+          );
+
+          if (boxResult.rows.length === 0) {
+            return reply.code(404).send({
+              success: false,
+              message: 'RFID / Kode Box tidak ditemukan atau barang belum memiliki lokasi.',
+            });
+          }
+
+          const box = boxResult.rows[0];
+          const boxStatus = String(box.box_status || '').toUpperCase();
+          if (!['IN_RACK', 'SEALED'].includes(boxStatus)) {
+            return reply.code(409).send({
+              success: false,
+              message: `Box ${box.box_code} berstatus ${boxStatus} dan tidak tersedia untuk transaksi POS.`,
+            });
+          }
+
+          return reply.send({
+            success: true,
+            message: `Box ${box.box_code} (${box.qty_per_box} unit) berhasil dibaca.`,
+            data: {
+              is_box: true,
+              box_id: box.box_id,
+              box_code: box.box_code,
+              box_level: box.box_level,
+              qty_per_box: Number(box.qty_per_box),
+              epc: box.master_epc,
+              product_id: box.product_id,
+              sku: box.sku,
+              name: box.product_name,
+              category: box.category,
+              price: Number(box.unit_price),
+              rack_code: box.rack_code || 'INB01',
+            },
           });
         }
 
@@ -258,12 +313,13 @@ app.get(
         });
       }
 
-      const body = request.body as {
+      const body = (request.body ?? {}) as {
         customer_name?: string;
         payment?: string;
         items?: Array<{
           epc?: string;
           epcs?: string[];
+          box_epcs?: string[];
         }>;
       };
 
@@ -291,20 +347,24 @@ app.get(
         });
       }
 
-      // Ambil EPC dari setiap item keranjang.
+      // Ambil EPC satuan dan EPC Box dari setiap item keranjang.
       const epcs = body.items.flatMap((item) => [
         ...(Array.isArray(item.epcs) ? item.epcs : []),
         ...(item.epc ? [item.epc] : []),
       ]).map((epc) => epc.trim()).filter(Boolean);
 
-      if (epcs.length === 0) {
+      const boxEpcs = body.items.flatMap((item) =>
+        Array.isArray(item.box_epcs) ? item.box_epcs : []
+      ).map((epc) => epc.trim()).filter(Boolean);
+
+      if (epcs.length === 0 && boxEpcs.length === 0) {
         return reply.code(400).send({
           success: false,
-          message: 'Tidak ada EPC RFID dalam keranjang.',
+          message: 'Tidak ada EPC RFID atau Box dalam keranjang.',
         });
       }
 
-      if (new Set(epcs).size !== epcs.length) {
+      if (new Set(epcs).size !== epcs.length || new Set(boxEpcs).size !== boxEpcs.length) {
         return reply.code(400).send({
           success: false,
           message: 'Terdapat EPC duplikat dalam keranjang.',
@@ -355,59 +415,115 @@ app.get(
 
         const cashierName = cashierResult.rows[0].full_name;
 
-        // Kunci data RFID dan barang selama proses checkout.
-        const itemResult = await client.query(
-          `
-          SELECT
-            t.id AS tag_id,
-            t.epc,
-            t.status AS tag_status,
-            i.id AS item_id,
-            i.status AS item_status,
-            p.id AS product_id,
-            p.sku,
-            p.name AS product_name,
-            p.unit_price,
-            l.id AS location_id,
-            l.code AS rack_code,
-            l.location_type
-          FROM public.tags t
-          INNER JOIN public.items i ON i.tag_id = t.id
-          INNER JOIN public.products p ON p.id = i.product_id
-          INNER JOIN public.locations l ON l.id = i.location_id
-          WHERE t.epc = ANY($1::text[])
-          FOR UPDATE OF t, i
-          `,
-          [epcs]
-        );
+        // Kunci data RFID satuan dan Box selama proses checkout.
+        let itemRows: any[] = [];
+        if (epcs.length > 0) {
+          const itemResult = await client.query(
+            `
+            SELECT
+              t.id AS tag_id,
+              t.epc,
+              t.status AS tag_status,
+              i.id AS item_id,
+              i.status AS item_status,
+              p.id AS product_id,
+              p.sku,
+              p.name AS product_name,
+              p.unit_price,
+              l.id AS location_id,
+              l.code AS rack_code,
+              l.location_type
+            FROM public.tags t
+            INNER JOIN public.items i ON i.tag_id = t.id
+            INNER JOIN public.products p ON p.id = i.product_id
+            INNER JOIN public.locations l ON l.id = i.location_id
+            WHERE t.epc = ANY($1::text[])
+            FOR UPDATE OF t, i
+            `,
+            [epcs]
+          );
 
-        if (itemResult.rows.length !== epcs.length) {
-          await client.query('ROLLBACK');
-          return reply.code(409).send({
-            success: false,
-            message: 'Ada RFID yang tidak ditemukan atau tidak memiliki data barang lengkap.',
-          });
+          if (itemResult.rows.length !== epcs.length) {
+            await client.query('ROLLBACK');
+            return reply.code(409).send({
+              success: false,
+              message: 'Ada RFID yang tidak ditemukan atau tidak memiliki data barang lengkap.',
+            });
+          }
+
+          const invalidItem = itemResult.rows.find(
+            (item) =>
+              item.tag_status !== 'IN_STOCK' ||
+              item.item_status !== 'IN_STOCK' ||
+              item.location_type !== 'RACK'
+          );
+
+          if (invalidItem) {
+            await client.query('ROLLBACK');
+            return reply.code(409).send({
+              success: false,
+              message: `Barang dengan EPC ${invalidItem.epc} sudah tidak tersedia untuk dijual.`,
+            });
+          }
+          itemRows = itemResult.rows;
         }
 
-        const invalidItem = itemResult.rows.find(
-          (item) =>
-            item.tag_status !== 'IN_STOCK' ||
-            item.item_status !== 'IN_STOCK' ||
-            item.location_type !== 'RACK'
-        );
+        let boxRows: any[] = [];
+        if (boxEpcs.length > 0) {
+          const boxQuery = await client.query(
+            `
+            SELECT
+              b.id AS box_id,
+              b.box_code,
+              b.master_epc,
+              b.qty_per_box,
+              b.status AS box_status,
+              b.location_id,
+              p.id AS product_id,
+              p.sku,
+              p.name AS product_name,
+              p.unit_price,
+              l.code AS rack_code
+            FROM public.boxes b
+            INNER JOIN public.products p ON p.id = b.product_id
+            LEFT JOIN public.locations l ON l.id = b.location_id
+            WHERE b.master_epc = ANY($1::text[])
+            FOR UPDATE OF b
+            `,
+            [boxEpcs]
+          );
 
-        if (invalidItem) {
-          await client.query('ROLLBACK');
-          return reply.code(409).send({
-            success: false,
-            message: `Barang dengan EPC ${invalidItem.epc} sudah tidak tersedia untuk dijual.`,
-          });
+          if (boxQuery.rows.length !== boxEpcs.length) {
+            await client.query('ROLLBACK');
+            return reply.code(409).send({
+              success: false,
+              message: 'Ada Box EPC yang tidak ditemukan di database.',
+            });
+          }
+
+          const invalidBox = boxQuery.rows.find(
+            (b) => !['IN_RACK', 'SEALED'].includes(String(b.box_status || '').toUpperCase())
+          );
+          if (invalidBox) {
+            await client.query('ROLLBACK');
+            return reply.code(409).send({
+              success: false,
+              message: `Box ${invalidBox.box_code} berstatus ${invalidBox.box_status} dan tidak tersedia untuk dijual.`,
+            });
+          }
+          boxRows = boxQuery.rows;
         }
 
-        const totalAmount = itemResult.rows.reduce(
-          (total, item) => total + Number(item.unit_price),
-          0
-        );
+        const totalQty =
+          itemRows.length +
+          boxRows.reduce((sum, b) => sum + Number(b.qty_per_box || 0), 0);
+
+        const totalAmount =
+          itemRows.reduce((total, item) => total + Number(item.unit_price), 0) +
+          boxRows.reduce(
+            (total, b) => total + Number(b.qty_per_box || 0) * Number(b.unit_price),
+            0
+          );
 
         invoiceNo = `POS-${Date.now()}-${randomUUID()
         .slice(0, 8)
@@ -434,7 +550,7 @@ app.get(
             randomUUID(),
             invoiceNo,
             customerName,
-            itemResult.rows.length,
+            totalQty,
             totalAmount,
             payment,
             cashierId,
@@ -443,8 +559,8 @@ app.get(
 
         const sale = saleResult.rows[0];
 
-        // Catat pengurangan stok melalui ledger.
-        for (const item of itemResult.rows) {
+        // Catat pengurangan stok melalui ledger (item satuan).
+        for (const item of itemRows) {
           await client.query(
             `
             INSERT INTO public.stock_movements (
@@ -484,22 +600,76 @@ app.get(
           );
         }
 
-        // Tandai RFID sebagai RESERVED agar tidak dijual ulang
-        // jika penerbitan Gate Pass mengalami kegagalan.
-        await client.query(
-          `
-          UPDATE public.tags
-          SET status = 'RESERVED', updated_at = NOW()
-          WHERE epc = ANY($1::text[])
-          `,
-          [epcs]
-        );
+        // Catat pengurangan stok melalui ledger (Box).
+        for (const b of boxRows) {
+          const boxQty = Number(b.qty_per_box || 0);
+          await client.query(
+            `
+            INSERT INTO public.stock_movements (
+              id,
+              tx_code,
+              movement_type,
+              product_id,
+              sku,
+              tag_id,
+              from_location,
+              to_location,
+              qty_change,
+              qty_label,
+              reference_doc,
+              performed_by_name,
+              performed_by,
+              from_location_id,
+              to_location_id
+            )
+            VALUES (
+              $1, $2, 'POS_SALE', $3, $4, NULL,
+              $5, 'POS', $6, $7, $8, $9, $10, $11, NULL
+            )
+            `,
+            [
+              randomUUID(),
+              `POS-BOX-${randomUUID()}`,
+              b.product_id,
+              b.sku,
+              b.rack_code || 'INB01',
+              -boxQty,
+              `${boxQty} UNIT (${b.box_code})`,
+              invoiceNo,
+              cashierName,
+              cashierId,
+              b.location_id || null,
+            ]
+          );
+        }
+
+        if (epcs.length > 0) {
+          await client.query(
+            `
+            UPDATE public.tags
+            SET status = 'RESERVED', updated_at = NOW()
+            WHERE epc = ANY($1::text[])
+            `,
+            [epcs]
+          );
+        }
+
+        if (boxEpcs.length > 0) {
+          await client.query(
+            `
+            UPDATE public.boxes
+            SET status = 'SHIPPED'
+            WHERE master_epc = ANY($1::text[])
+            `,
+            [boxEpcs]
+          );
+        }
 
         await client.query('COMMIT');
         committed = true;
 
         // Minta Orang 4 menerbitkan Gate Pass.
-        
+        const allGateEpcs = [...epcs, ...boxEpcs];
         request.log.info('MULAI MEMANGGIL ENDPOINT GATE PASS');
 
         const gatePassResponse = await app.inject({
@@ -511,7 +681,7 @@ app.get(
             reference_type: 'POS',
             customer_or_destination: customerName,
             courier: null,
-            epc_list: epcs,
+            epc_list: allGateEpcs,
             authorized_by: cashierId,
             valid_hours: 4,
           },
@@ -554,7 +724,7 @@ app.get(
             data: {
               invoice_no: invoiceNo,
               sale_id: sale.id,
-              total_items: itemResult.rows.length,
+              total_items: totalQty,
               total_amount: totalAmount,
               payment_method: payment,
             },
@@ -568,17 +738,28 @@ app.get(
             invoice_no: invoiceNo,
             sale_id: sale.id,
             customer_name: customerName,
-            total_items: itemResult.rows.length,
+            total_items: totalQty,
             total_amount: totalAmount,
             payment_method: payment,
             payment_status: 'PAID',
-            items: itemResult.rows.map((item) => ({
-              epc: item.epc,
-              sku: item.sku,
-              product_name: item.product_name,
-              price: Number(item.unit_price),
-              rack_code: item.rack_code,
-            })),
+            items: [
+              ...itemRows.map((item) => ({
+                epc: item.epc,
+                sku: item.sku,
+                product_name: item.product_name,
+                price: Number(item.unit_price),
+                rack_code: item.rack_code,
+              })),
+              ...boxRows.map((b) => ({
+                epc: b.master_epc,
+                box_code: b.box_code,
+                qty_per_box: Number(b.qty_per_box),
+                sku: b.sku,
+                product_name: b.product_name,
+                price: Number(b.unit_price),
+                rack_code: b.rack_code || 'INB01',
+              })),
+            ],
             gate_pass: gatePassResult.data,
           },
         });

@@ -1691,6 +1691,27 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
             tagItemMap.set(String(row.epc).trim(), row);
           }
 
+          // Cek juga di tabel boxes (untuk penjualan/pengiriman berbasis Master Box / Inner Box)
+          const boxItemsRes = await client.query(
+            `SELECT
+               b.id AS box_id,
+               b.box_code,
+               b.master_epc,
+               b.qty_per_box,
+               b.status AS box_status,
+               p.name AS product_name
+             FROM public.boxes b
+             INNER JOIN public.products p ON p.id = b.product_id
+             WHERE b.master_epc = ANY($1::text[])
+             FOR UPDATE OF b`,
+            [epcsToProcess]
+          );
+
+          const boxItemMap = new Map<string, Record<string, any>>();
+          for (const b of boxItemsRes.rows) {
+            boxItemMap.set(String(b.master_epc).trim(), b);
+          }
+
           // Cek apakah sudah pernah tercatat keluar di gate_events
           const exitedEventsRes = await client.query(
             `SELECT DISTINCT epc
@@ -1706,8 +1727,23 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
           for (const scannedEpc of epcsToProcess) {
             const tagRow = tagItemMap.get(scannedEpc);
+            const boxRow = boxItemMap.get(scannedEpc);
 
-            // Validasi 0: EPC harus ada di database
+            // Jika EPC milik Box (Master/Inner Box), validasi khusus Box
+            if (!tagRow && boxRow) {
+              if (alreadyExitedEpcs.has(scannedEpc)) {
+                await client.query('ROLLBACK');
+                txStarted = false;
+                return reply.code(409).send({
+                  status: 'error',
+                  success: false,
+                  message: `Scan-Out ditolak: Box ${boxRow.box_code} (${scannedEpc}) sudah pernah keluar gerbang.`,
+                });
+              }
+              continue;
+            }
+
+            // Validasi 0: EPC harus ada di database (tags atau boxes)
             if (!tagRow) {
               await client.query('ROLLBACK');
               txStarted = false;
@@ -1850,6 +1886,12 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           // 7. Catat Gate Events dalam transaksi yang sama
           for (const scannedEpc of epcsToProcess) {
             const tagRow = tagItemMap.get(scannedEpc);
+            const boxRow = boxItemMap.get(scannedEpc);
+            const itemNameLabel = tagRow?.product_name
+              ? `${tagRow.product_name} (${pass.pass_code})`
+              : boxRow?.product_name
+              ? `${boxRow.product_name} - ${boxRow.box_code} (${boxRow.qty_per_box} unit)`
+              : `Barang Gate Pass ${pass.pass_code}`;
             await client.query(
               `INSERT INTO public.gate_events (
                  id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
@@ -1861,9 +1903,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
                 gate_id,
                 scannedEpc,
                 tagRow?.tag_id || null,
-                tagRow?.product_name
-                  ? `${tagRow.product_name} (${pass.pass_code})`
-                  : `Barang Gate Pass ${pass.pass_code}`,
+                itemNameLabel,
                 antenna_info,
                 rssi,
                 pass.id,

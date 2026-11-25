@@ -66,55 +66,66 @@ export async function getAggregatedStockByProduct() {
  */
 export async function getStockByRack() {
   const result = await db.query(`
+    WITH item_rack AS (
+      SELECT
+        l.id AS location_id,
+        l.code AS rack_code,
+        l.name AS rack_name,
+        p.id AS product_id,
+        p.sku,
+        p.name AS product_name,
+        p.category,
+        COUNT(i.id)::INT AS quantity,
+        COUNT(i.id) FILTER (WHERE i.status = 'IN_STOCK')::INT AS available_quantity,
+        COUNT(i.id) FILTER (WHERE i.status = 'RESERVED')::INT AS reserved_quantity,
+        COUNT(i.id) FILTER (WHERE i.status = 'AUTHORIZED_OUT')::INT AS authorized_out_quantity
+      FROM items i
+      INNER JOIN products p ON p.id = i.product_id
+      INNER JOIN locations l ON l.id = i.location_id
+      WHERE l.location_type = 'RACK'
+        AND i.status IN ('IN_STOCK', 'RESERVED', 'AUTHORIZED_OUT')
+      GROUP BY l.id, l.code, l.name, p.id, p.sku, p.name, p.category
+    ),
+    box_rack AS (
+      SELECT
+        l.id AS location_id,
+        l.code AS rack_code,
+        l.name AS rack_name,
+        p.id AS product_id,
+        p.sku,
+        p.name AS product_name,
+        p.category,
+        COALESCE(SUM(b.qty_per_box), 0)::INT AS quantity,
+        COALESCE(SUM(b.qty_per_box), 0)::INT AS available_quantity,
+        0::INT AS reserved_quantity,
+        0::INT AS authorized_out_quantity
+      FROM boxes b
+      INNER JOIN products p ON p.id = b.product_id
+      INNER JOIN locations l ON l.id = b.location_id
+      WHERE l.location_type = 'RACK'
+        AND b.status = 'IN_RACK'
+      GROUP BY l.id, l.code, l.name, p.id, p.sku, p.name, p.category
+    ),
+    combined AS (
+      SELECT * FROM item_rack
+      UNION ALL
+      SELECT * FROM box_rack
+    )
     SELECT
-      l.id AS location_id,
-      l.code AS rack_code,
-      l.name AS rack_name,
-      p.id AS product_id,
-      p.sku,
-      p.name AS product_name,
-      p.category,
-
-      COUNT(i.id)::INT AS quantity,
-
-      COUNT(i.id) FILTER (
-        WHERE i.status = 'IN_STOCK'
-      )::INT AS available_quantity,
-
-      COUNT(i.id) FILTER (
-        WHERE i.status = 'RESERVED'
-      )::INT AS reserved_quantity,
-
-      COUNT(i.id) FILTER (
-        WHERE i.status = 'AUTHORIZED_OUT'
-      )::INT AS authorized_out_quantity
-
-    FROM items i
-    INNER JOIN products p
-      ON p.id = i.product_id
-    INNER JOIN locations l
-      ON l.id = i.location_id
-
-    WHERE
-      l.location_type = 'RACK'
-      AND i.status IN (
-        'IN_STOCK',
-        'RESERVED',
-        'AUTHORIZED_OUT'
-      )
-
-    GROUP BY
-      l.id,
-      l.code,
-      l.name,
-      p.id,
-      p.sku,
-      p.name,
-      p.category
-
-    ORDER BY
-      l.code ASC,
-      p.sku ASC
+      location_id,
+      rack_code,
+      rack_name,
+      product_id,
+      sku,
+      product_name,
+      category,
+      SUM(quantity)::INT AS quantity,
+      SUM(available_quantity)::INT AS available_quantity,
+      SUM(reserved_quantity)::INT AS reserved_quantity,
+      SUM(authorized_out_quantity)::INT AS authorized_out_quantity
+    FROM combined
+    GROUP BY location_id, rack_code, rack_name, product_id, sku, product_name, category
+    ORDER BY rack_code ASC, sku ASC
   `);
 
   return result.rows.map((row) => ({
