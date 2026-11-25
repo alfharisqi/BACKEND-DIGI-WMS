@@ -116,12 +116,12 @@ test('Chrome: login, actual sidebar, rack, EPC checklist, packing checklist, rel
     let pageErrors = 0;
     page.on('pageerror', () => { pageErrors++; });
     await page.goto(uiUrl);
-    await page.getByPlaceholder(/Contoh: admin/).fill(qa.actor.username);
-    await page.getByPlaceholder(/Masukkan password/).fill(qa.password);
+    await page.getByLabel('Username', { exact: true }).fill(qa.actor.username);
+    await page.getByLabel('Password', { exact: true }).fill(qa.password);
     const authenticated = page.waitForResponse((response: any) => response.url() === apiUrl + '/auth/login' && response.request().method() === 'POST');
     await page.getByRole('button', { name: /Masuk ke Sistem/ }).click();
     assert.equal((await authenticated).status(), 200);
-    const navigation = page.getByRole('button', { name: /Picking & Packing/ });
+    const navigation = page.getByRole('button', { name: 'Picking & Packing', exact: true });
     await navigation.waitFor();
     steps.push('Login QA melalui halaman login existing');
 

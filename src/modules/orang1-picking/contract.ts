@@ -1,4 +1,4 @@
-export const pickingStatuses = ['MENUNGGU_PICKING', 'SEDANG_DIAMBIL', 'SIAP_PACKING'] as const;
+export const pickingStatuses = ['MENUNGGU_PICKING', 'SEDANG_DIAMBIL', 'SIAP_PACKING', 'DIKIRIM'] as const;
 export type PickingStatus = typeof pickingStatuses[number];
 export const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const packingFields = ['quantity_checked', 'epc_checked', 'condition_checked', 'packaging_checked', 'label_checked'] as const;

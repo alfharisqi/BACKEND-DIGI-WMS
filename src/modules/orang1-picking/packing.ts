@@ -53,7 +53,9 @@ async function completePicking(db: PoolClient, orderId: string) {
           JOIN public.items i ON i.id = s.item_id AND i.product_id = s.product_id AND i.tag_id = s.tag_id
           JOIN public.tags t ON t.id = s.tag_id AND t.epc = s.epc
           WHERE s.order_id = line.order_id AND s.product_id = line.product_id
-            AND s.released_at IS NULL AND i.status = 'RESERVED' AND t.status = 'RESERVED'
+            AND s.released_at IS NULL
+            AND i.status IN ('RESERVED', 'AUTHORIZED_OUT', 'EXITED')
+            AND t.status IN ('RESERVED', 'AUTHORIZED_OUT', 'EXITED')
         )
       ) AS complete
     FROM public.picking_orders o WHERE o.id = $1`, [orderId]);
@@ -136,6 +138,54 @@ export class PackingRepository {
         await db.query(`UPDATE public.picking_packing SET status='SELESAI_PACKING',
           revision=$2, updated_at=now(), completed_at=now(), completed_by=$3 WHERE order_id=$1`,
         [orderId, revision, actorId]);
+
+        // Otomatis otorisasi seluruh EPC pada order ini menjadi AUTHORIZED_OUT
+        // dan terbitkan Gate Pass otomatis sehingga di gerbang cukup scan EPC barang langsung!
+        const orderMeta = (await db.query<{ order_number: string }>(
+          `SELECT order_number FROM public.picking_orders WHERE id = $1`,
+          [orderId]
+        )).rows[0];
+
+        const scannedRows = (await db.query<{ item_id: string; tag_id: string; epc: string }>(
+          `SELECT item_id, tag_id, epc
+           FROM public.picking_scans
+           WHERE order_id = $1 AND released_at IS NULL`,
+          [orderId]
+        )).rows;
+
+        if (scannedRows.length > 0) {
+          const tagIds = scannedRows.map(r => r.tag_id);
+          const itemIds = scannedRows.map(r => r.item_id);
+
+          await db.query(
+            `UPDATE public.tags
+             SET status = 'AUTHORIZED_OUT', updated_at = now()
+             WHERE id = ANY($1::uuid[]) AND status = 'RESERVED'`,
+            [tagIds]
+          );
+
+          await db.query(
+            `UPDATE public.items
+             SET status = 'AUTHORIZED_OUT', updated_at = now()
+             WHERE id = ANY($1::uuid[]) AND status = 'RESERVED'`,
+            [itemIds]
+          );
+
+          const refResi = orderMeta?.order_number || `PACK-${orderId.slice(0, 8).toUpperCase()}`;
+          const existingPass = await db.query(
+            `SELECT id FROM public.gate_passes WHERE reference_resi = $1 AND status = 'ACTIVE' LIMIT 1`,
+            [refResi]
+          );
+
+          if (existingPass.rowCount === 0) {
+            const passCode = `GP-PACK-${Math.floor(1000 + Math.random() * 9000)}`;
+            await db.query(
+              `INSERT INTO public.gate_passes (pass_code, reference_resi, authorized_by, status, valid_until, created_at)
+               VALUES ($1, $2, $3, 'ACTIVE', now() + interval '24 hours', now())`,
+              [passCode, refResi, actorId]
+            );
+          }
+        }
       } else {
         await db.query(`INSERT INTO public.picking_packing(
           order_id, quantity_checked, epc_checked, condition_checked, packaging_checked, label_checked, revision, checked_by

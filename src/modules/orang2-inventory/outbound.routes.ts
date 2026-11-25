@@ -72,6 +72,17 @@ export async function outboundRoutes(app: FastifyInstance) {
             COALESCE(pack.status, o.status) AS destination,
             'JNE Express'::text AS courier,
             CASE
+              WHEN o.status = 'SIAP_PACKING'
+                AND EXISTS (
+                  SELECT 1 FROM public.picking_scans ps2
+                  WHERE ps2.order_id = o.id AND ps2.released_at IS NULL
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM public.picking_scans ps2
+                  JOIN public.items it2 ON it2.id = ps2.item_id
+                  WHERE ps2.order_id = o.id AND ps2.released_at IS NULL
+                    AND it2.status NOT IN ('AUTHORIZED_OUT', 'EXITED')
+                ) THEN 'DIKIRIM'
               WHEN pack.status = 'SELESAI_PACKING' THEN 'SELESAI_PACKING'
               ELSE o.status
             END AS status,
