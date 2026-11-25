@@ -1,8 +1,8 @@
-
 import { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { db, isPostgresConnected } from '../../config/db';
 import { authenticate, requireRoles } from '../../middleware/auth';
+import { publishRealtimeEvent } from '../../config/mqtt';
 
 /**
  * MODUL ORANG 3: KASIR POS & MODUL RETUR
@@ -84,10 +84,19 @@ app.get(
 
       const saleResult = await db.query(
         `
-        SELECT id, invoice_or_resi, customer_or_destination
+        SELECT
+        id,
+        invoice_or_resi,
+        customer_or_destination,
+        total_items,
+        total_amount,
+        payment_status,
+        payment_method,
+        cashier_or_pic,
+        created_at
         FROM public.sales
         WHERE invoice_or_resi = $1
-          AND order_type = 'POS'
+        AND order_type = 'POS'
         LIMIT 1
         `,
         [invoice_no]
@@ -106,6 +115,9 @@ app.get(
           sm.tag_id,
           sm.product_id,
           sm.sku,
+          p.name AS product_name,
+          p.unit_price,
+          sm.qty_change,
           t.epc,
           t.status AS tag_status,
           EXISTS (
@@ -117,6 +129,7 @@ app.get(
           ) AS already_returned
         FROM public.stock_movements sm
         INNER JOIN public.tags t ON t.id = sm.tag_id
+        LEFT JOIN public.products p ON p.id = sm.product_id
         WHERE sm.movement_type = 'POS_SALE'
           AND sm.reference_doc = $1
         ORDER BY sm.created_at ASC
@@ -1205,6 +1218,35 @@ app.get(
             [targetLocation.id, item.item_id]
           );
 
+
+          // Perbarui status invoice berdasarkan seluruh barang yang sudah diretur.
+          await client.query(
+            `
+            UPDATE public.sales s
+            SET shipping_status = CASE
+              WHEN NOT EXISTS (
+                SELECT 1
+                FROM public.stock_movements sm
+                WHERE sm.movement_type = 'POS_SALE'
+                  AND sm.reference_doc = s.invoice_or_resi
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM public.stock_movements rm
+                    WHERE rm.movement_type = 'RETURN_RESTOCK'
+                      AND rm.reference_doc = sm.reference_doc
+                      AND rm.tag_id = sm.tag_id
+                  )
+              )
+              THEN 'RETURNED'
+              ELSE 'GATE_PASS_ISSUED'
+            END
+            WHERE s.invoice_or_resi = $1
+              AND s.order_type = 'POS'
+            `,
+            [invoiceNo]
+          );
+
+
           await client.query('COMMIT');
           committed = true;
 
@@ -1350,6 +1392,40 @@ app.get(
         });
       }
 
+        }
+  );
+
+  // 5. POST Simulasi Desktop RFID Reader untuk POS
+  app.post(
+    '/api/pos/rfid-reader/simulate',
+    {
+      preHandler: [
+        authenticate,
+        requireRoles('KASIR', 'KASIR_POS', 'SUPERVISOR'),
+      ],
+    },
+    async (request, reply) => {
+      const body = request.body as { epc?: string };
+      const epc = body.epc?.trim();
+
+      if (!epc) {
+        return reply.code(400).send({
+          success: false,
+          message: 'EPC RFID wajib diisi.',
+        });
+      }
+
+      publishRealtimeEvent('wms/pos/live-scan', {
+        event: 'POS_RFID_SCANNED',
+        epc,
+        device: 'DESKTOP-RFID-SIM-01',
+      });
+
+      return reply.send({
+        success: true,
+        message: 'EPC berhasil dikirim ke MQTT live-scan.',
+        data: { epc },
+      });
     }
   );
 
