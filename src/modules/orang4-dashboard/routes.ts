@@ -671,11 +671,14 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
     if (isPostgresConnected) {
       const res = await db.query(`
-        SELECT a.*, COALESCE(u.full_name, 'System Admin') AS user_name, COALESCE(u.role, 'ADMIN') AS user_role
+        SELECT
+          a.*,
+          COALESCE(u.full_name, NULLIF(a.payload->>'full_name', ''), NULLIF(a.payload->>'username', ''), 'System Admin') AS user_name,
+          COALESCE(u.role, NULLIF(a.payload->>'role', ''), 'ADMIN') AS user_role
         FROM audit_logs a
         LEFT JOIN users u ON a.user_id = u.id
         ORDER BY a.created_at DESC
-        LIMIT 50
+        LIMIT 200
       `);
       rawLogs = res.rows;
     } else {

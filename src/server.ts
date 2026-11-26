@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { checkDatabaseConnection } from './config/db';
 import { initMqttClient } from './config/mqtt';
+import { registerActivityAuditHook } from './config/auditHook';
 import { orang1InboundRoutes } from './modules/orang1-inbound/routes';
 import { orang1PickingRoutes } from './modules/orang1-picking/routes';
 import { orang2InventoryRoutes } from './modules/orang2-inventory/routes';
@@ -73,7 +74,8 @@ async function bootstrap() {
 
   app.get('/favicon.ico', async (_req, reply) => reply.code(204).send());
 
-  // 2. Daftarkan modul seluruh tim
+  // 2. Daftarkan Activity Audit Hook & modul seluruh tim
+  registerActivityAuditHook(app);
   await app.register(orang1InboundRoutes); // Orang 1: Master SKU, Tagging & Inbound GRN
   await app.register(orang1PickingRoutes);
   await app.register(orang2InventoryRoutes); // Orang 2: Rak, Putaway & Stock Movement Ledger

@@ -31,14 +31,43 @@ const databaseUrl =
 export const db = new Pool(localIdentity ? localDatabase.dbOptions(localIdentity) : {
   connectionString: databaseUrl,
   max: 15,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 25000,
+  idleTimeoutMillis: 20000,
+  connectionTimeoutMillis: 15000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
   ssl:
     databaseUrl.includes('supabase.com') ||
     databaseUrl.includes('sslmode=require')
       ? { rejectUnauthorized: false }
       : undefined,
 });
+
+// Auto-retry sekali jika koneksi idle diputus oleh Supabase Supavisor Pooler
+const rawPoolQuery = db.query.bind(db) as (...args: any[]) => Promise<any>;
+(db as any).query = async (...args: any[]) => {
+  try {
+    return await rawPoolQuery(...args);
+  } catch (err: any) {
+    const msg = String(err?.message || '');
+    const code = String(err?.code || '');
+    const isTransientDisconnect =
+      typeof args[0] === 'string' &&
+      (msg.includes('Connection terminated') ||
+        msg.includes('connection error') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('socket hang up') ||
+        code === 'ECONNRESET' ||
+        code === '57P01' ||
+        code === '08006' ||
+        code === '08003');
+    if (isTransientDisconnect) {
+      console.warn('[PostgreSQL] Koneksi pool terputus saat idle, mencoba ulang query otomatis...');
+      return await rawPoolQuery(...args);
+    }
+    throw err;
+  }
+};
 
 // Menangani error pada koneksi pool PostgreSQL.
 db.on('error', (error) => {
