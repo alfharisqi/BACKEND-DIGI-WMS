@@ -1,6 +1,7 @@
 import { Pool, PoolClient } from 'pg';
-import { PickingError, PickingStatus, ScanRejected, createOrderInput, pickingEpcPattern } from './contract';
+import { PickingError, PickingStatus, ScanRejected, cancellationInput, createOrderInput, pickingCancellationRole, pickingEpcPattern } from './contract';
 import { requireWarehouseAccount, type WarehouseSession } from '../warehouse-session';
+import { releasableReservation, releaseReservations, reservationJoins } from './cancellation-reservations';
 
 type Database = Pool | PoolClient;
 
@@ -30,6 +31,55 @@ FROM public.products p LEFT JOIN stock ON stock.product_id = p.id
 WHERE p.id = ANY($1::uuid[])`;
 
 type ProductStock = { product_id: string; sku: string; product_name: string; available_qty: number };
+
+const cancellationFields = 'order_id, order_number, previous_status, reason, notes, actor_id, actor_name, cancelled_at, physical_return_confirmed, released_units';
+
+// Existing downstream documents can reference a Picking number directly or via
+// the Outbound UI's default resi. These checks are only a conservative veto.
+// Activation also requires the consumers to reject stale references by order UUID.
+const cancellableOrders = `
+SELECT o.id
+FROM public.picking_orders o
+WHERE o.id = ANY($1::uuid[]) AND (
+    (o.status = 'MENUNGGU_PICKING' AND NOT EXISTS (SELECT 1 FROM public.picking_scans s WHERE s.order_id = o.id))
+    OR (o.status = 'SEDANG_DIAMBIL'
+        AND EXISTS (SELECT 1 FROM public.picking_scans ps WHERE ps.order_id = o.id AND ps.released_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM public.picking_scans ps ${reservationJoins}
+            WHERE ps.order_id = o.id AND ps.released_at IS NULL AND (${releasableReservation}) IS NOT TRUE))
+    )
+    AND NOT EXISTS (SELECT 1 FROM public.picking_packing p WHERE p.order_id = o.id)
+    AND NOT EXISTS (SELECT 1 FROM public.audit_logs a WHERE a.action = 'OUTBOUND_HANDOFF'
+        AND a.payload->>'source_type' = 'PICKING_ORANG1' AND a.payload->>'source_id' = o.id::text)
+    AND NOT EXISTS (SELECT 1 FROM public.outbound_picking_orders p WHERE p.order_number = o.order_number)
+    AND NOT EXISTS (SELECT 1 FROM public.sales s WHERE s.invoice_or_resi IN (o.order_number, 'RESI-' || o.order_number))
+    AND NOT EXISTS (SELECT 1 FROM public.gate_passes g WHERE g.reference_resi IN (o.order_number, 'RESI-' || o.order_number))
+    AND NOT EXISTS (SELECT 1 FROM public.stock_movements m WHERE m.reference_doc IN (o.order_number, 'RESI-' || o.order_number))`;
+
+async function cancellationSchemaReady(db: Database) {
+  const { rows: [schema] } = await db.query<{ ready: boolean }>(`
+    WITH audit AS (SELECT to_regclass('public.picking_cancellations') AS id)
+    SELECT coalesce(
+        has_table_privilege(audit.id, 'SELECT') AND has_table_privilege(audit.id, 'INSERT')
+        AND EXISTS (
+            SELECT 1 FROM pg_constraint c
+            WHERE c.conrelid = 'public.picking_orders'::regclass
+                AND c.conname = 'picking_orders_status_check' AND c.contype = 'c' AND c.convalidated
+                AND strpos(pg_get_constraintdef(c.oid), quote_literal('DIBATALKAN')) > 0
+        )
+        AND (
+            SELECT count(*) FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') AND (
+              (t.tgrelid = 'public.picking_orders'::regclass AND t.tgname = 'picking_cancellation_terminal')
+              OR (t.tgrelid = 'public.picking_scans'::regclass AND t.tgname = 'picking_cancellation_reject_scan')
+              OR (t.tgrelid = 'public.tags'::regclass AND t.tgname = 'picking_cancellation_protect_reserved_tag')
+            )
+        ) = 3
+        AND (
+            SELECT count(*) FROM pg_attribute a WHERE a.attrelid = audit.id AND NOT a.attisdropped
+              AND a.attname IN ('physical_return_confirmed', 'released_units')
+        ) = 2, false
+    ) AS ready FROM audit`);
+  return schema?.ready === true;
+}
 
 const orderView = `
 WITH order_base AS (
@@ -163,7 +213,15 @@ GROUP BY o.id, o.order_number, o.status, o.shipping_stage, o.created_at, o.updat
 ORDER BY o.created_at, o.id`;
 
 export async function selectOrders(db: Database, status: PickingStatus | null, orderId: string | null, candidates = false) {
-  return (await db.query(orderView, [status, orderId, candidates])).rows;
+  const { rows } = await db.query(orderView, [status, orderId, candidates]);
+  const cancelledIds = rows.filter(order => order.status === 'DIBATALKAN').map(order => order.id);
+  if (!cancelledIds.length) return rows;
+  const audits = await db.query(`
+    SELECT ${cancellationFields} FROM public.picking_cancellations WHERE order_id = ANY($1::uuid[])`, [cancelledIds]);
+  const cancellations = new Map(audits.rows.map(audit => [audit.order_id, audit]));
+  return rows.map(order => order.status === 'DIBATALKAN'
+    ? { ...order, cancellation: cancellations.get(order.id) ?? null }
+    : order);
 }
 
 export async function verifyPickingAccount(db: Database, session: WarehouseSession, lock = false) {
@@ -174,11 +232,75 @@ export async function verifyPickingAccount(db: Database, session: WarehouseSessi
 }
 
 export class PickingRepository {
-  constructor(private readonly pool: Pool) {}
+  // Cancellation requires an explicit runtime opt-in and the verified schema.
+  constructor(
+    private readonly pool: Pool,
+    private readonly options: { cancellationApproved?: boolean } = {},
+  ) {}
 
   async orders(status: PickingStatus | null, session: WarehouseSession) {
     await verifyPickingAccount(this.pool, session);
-    return selectOrders(this.pool, status, null);
+    const orders = await selectOrders(this.pool, status, null);
+    const candidates = orders.filter(order => ['MENUNGGU_PICKING', 'SEDANG_DIAMBIL'].includes(order.status)).map(order => order.id);
+    const eligible = new Set<string>();
+    if (candidates.length && session.role === pickingCancellationRole && this.options.cancellationApproved
+      && await cancellationSchemaReady(this.pool)) {
+      const { rows } = await this.pool.query<{ id: string }>(cancellableOrders, [candidates]);
+      rows.forEach(row => eligible.add(row.id));
+    }
+    return orders.map(order => ({ ...order, can_cancel: eligible.has(order.id) }));
+  }
+
+  async cancel(orderId: string, input: ReturnType<typeof cancellationInput>, session: WarehouseSession) {
+    if (session.role !== pickingCancellationRole) throw new PickingError(403, 'Akun ini tidak berwenang membatalkan pesanan picking.');
+    if (!this.options.cancellationApproved) throw new PickingError(503, 'Pembatalan pesanan picking belum diaktifkan.');
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      const actor = await verifyPickingAccount(client, session, true);
+      if (!await cancellationSchemaReady(client)) {
+        throw new PickingError(503, 'Skema pembatalan pesanan picking belum siap.');
+      }
+      const { rows: [order] } = await client.query<{ status: PickingStatus; order_number: string }>(
+        'SELECT status, order_number FROM public.picking_orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (!order) throw new PickingError(404, 'Pesanan picking tidak ditemukan.');
+      const partial = order.status === 'SEDANG_DIAMBIL';
+      if (!partial && order.status !== 'MENUNGGU_PICKING') {
+        throw new PickingError(409, 'Pesanan sudah melewati tahap Picking atau sudah dibatalkan.');
+      }
+
+      // This is a separate statement after acquiring the order lock so it sees
+      // scan/packing records committed while cancellation waited for that lock.
+      const eligible = await client.query(cancellableOrders, [[orderId]]);
+      if (eligible.rowCount !== 1) {
+        throw new PickingError(409, 'Pesanan memiliki histori yang menghalangi pembatalan atau reservasi yang tidak dapat dilepas.');
+      }
+      if (partial !== input.physicalReturnConfirmed) {
+        throw new PickingError(400, partial
+          ? 'Konfirmasi pengembalian fisik seluruh EPC ke rak sebelum membatalkan.'
+          : 'Pesanan Menunggu Picking tidak memiliki EPC untuk dikembalikan.');
+      }
+      const released = partial ? await releaseReservations(client, orderId, input.returnScanIds) : [];
+      const updated = await client.query(`
+        UPDATE public.picking_orders SET status = 'DIBATALKAN', updated_at = now()
+        WHERE id = $1 AND status = $2`, [orderId, order.status]);
+      if (updated.rowCount !== 1) throw new PickingError(409, 'Status pesanan telah berubah.');
+      const { rows: [cancellation] } = await client.query(`
+        INSERT INTO public.picking_cancellations
+          (order_id, order_number, previous_status, reason, notes, actor_id, actor_name, physical_return_confirmed, released_units)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb) RETURNING ${cancellationFields}`,
+      [orderId, order.order_number, order.status, input.reason, input.notes, session.id, actor.name, partial, JSON.stringify(released)]);
+      if (!cancellation) throw new PickingError(500, 'Audit pembatalan belum tersimpan.');
+      await client.query('COMMIT');
+      return { id: orderId, status: 'DIBATALKAN', can_cancel: false, cancellation };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async availability(productId: string, session: WarehouseSession) {

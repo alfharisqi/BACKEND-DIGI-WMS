@@ -58,13 +58,21 @@ Penolakan bisnis yang spesifik terhadap satu EPC menyertakan `code: 'PICKING_SCA
 | 500 | Galat transaksi di luar konflik yang dikenal. Periksa progres melalui GET sebelum mencoba lagi |
 | 503 | Database, skema, atau konfigurasi autentikasi belum siap |
 
+## Pembatalan Picking
+
+`POST /api/picking/orders/:orderId/cancel` menerima `{ reason, notes? }` untuk `MENUNGGU_PICKING`. Untuk `SEDANG_DIAMBIL`, sertakan `physical_return_confirmed: true` dan `return_scan_ids` berisi seluruh ID scan aktif milik order yang EPC-nya sudah dikembalikan ke rak. Gunakan kode alasan pada SQL 006. Alasan `LAINNYA` memerlukan keterangan. Hanya `ADMIN` aktif yang dapat membatalkan. Identitas petugas berasal dari JWT dan akun aktif.
+
+`GET /api/picking/orders` menyertakan `can_cancel` setelah memeriksa sakelar aktivasi, skema 006, akun, kondisi order, dan dokumen terkait. Frontend memakai nilai ini untuk tombol dan submit. Endpoint POST memeriksa ulang order, kepemilikan EPC dan rak asal setelah mengunci baris yang relevan. Jika satu EPC gagal, transaksi dibatalkan. Jika berhasil, pelepasan RFID, waktu `released_at`, status `DIBATALKAN`, dan audit disimpan dalam satu transaksi. Pembatalan mempertahankan histori scan dan saldo ledger. Responsnya `data: { id, status: 'DIBATALKAN', can_cancel: false, cancellation }` dengan rincian EPC dan rak pada `cancellation.released_units`.
+
+`GET /api/picking/orders?status=DIBATALKAN` dan detail Packing mengembalikan audit historis untuk order batal. Aksi scan dan Packing menolaknya. Alasan yang salah menghasilkan 400, akun yang tidak berwenang 403, order tidak ditemukan 404, kondisi tidak memenuhi syarat 409, dan fitur atau skema belum siap 503. [Panduan aktivasi dan pembaruan](ORANG1_MVP2_PICKING_ENHANCEMENT_REPORT.md)
+
 ## Kontrak sumber order dan serah terima
 
 Produsen pesanan yang disepakati tim menulis satu `picking_orders` dan seluruh `picking_order_lines` dalam satu transaksi. Gunakan nomor pesanan bisnis unik dan `product_id` UUID yang merujuk produk existing. Gabungkan permintaan SKU yang sama ke satu baris. Terbitkan pesanan ketika seluruh baris valid, dengan kuantitas positif. Proses picking memiliki kepemilikan atas status setelah publikasi. Perubahan order yang sudah diproses memerlukan prosedur pembatalan atau koreksi bersama.
 
-Orang 2 dapat membaca pesanan `SIAP_PACKING` dan UUID `item_id`/`tag_id` dari scan aktif. Pada transaksi pengiriman, kunci pesanan serta unit yang akan dikonsumsi, periksa kepemilikan reservasi dan status, lalu serahkan pemotongan stok dan ledger ke modul Outbound. Orang 3 perlu memeriksa kedua status `IN_STOCK` serta reservasi aktif di dalam transaksi POS, dengan lock yang sama pada tag dan item. Orang 4 dapat memakai identitas hasil serah terima pengiriman untuk otorisasi Gate Pass. Kontrak tersebut perlu disepakati sebelum menghubungkan produsen dan konsumen di Production.
+Outbound membaca pesanan Orang 1 yang sudah final Packing untuk ditawarkan sebagai sumber Pengiriman. Transaksi mengunci order sumber serta unit, memeriksa kepemilikan reservasi dan status, lalu mencatat debit ledger atau memakai debit POS yang sudah ada. Gate Pass menyimpan otorisasi beserta identitas EPC dan dokumen sumber. [Kontrak Pengiriman dan Gate Pass](ORANG1_MVP2_PICKING_ENHANCEMENT_REPORT.md#perubahan-api-dan-integrasi)
 
-`released_at` disediakan agar transaksi downstream terotorisasi kelak dapat menyelesaikan atau melepas reservasi tanpa menghapus bukti scan. Picking menulis reservasi melalui endpoint scan. Packing membaca reservasi aktif dan menyimpan pemeriksaan serta finalisasi melalui [endpoint Packing](ORANG1_MVP2_PACKING_REPORT.md#api-dan-skema). Pelepasan reservasi tetap menjadi bagian transaksi downstream.
+`released_at` mempertahankan bukti scan saat reservasi dilepas. Picking menulis reservasi melalui endpoint scan. Pembatalan parsial mengisi waktu pelepasan dan mengembalikan tag serta item ke `IN_STOCK`. Packing membaca reservasi aktif dan menyimpan pemeriksaan serta finalisasi. [Endpoint Packing](ORANG1_MVP2_PACKING_REPORT.md#api-dan-skema)
 
 Transaksi memakai lock baris untuk order, tag, item, dan baris SKU, disertai keunikan reservasi aktif untuk tag dan item. [Dokumentasi lock PostgreSQL](https://www.postgresql.org/docs/16/explicit-locking.html) · [Dokumentasi partial index](https://www.postgresql.org/docs/16/indexes-partial.html)
 

@@ -42,7 +42,7 @@ const start = (): Step[] => [
   [/^BEGIN$/],
   [/^SET LOCAL lock_timeout/],
   [/public.users.+?FOR SHARE/s, [{ role: session.role, is_active: true, name: 'Fixture' }], [session.id]],
-  [/public.picking_orders WHERE id = \$1 FOR UPDATE/, [{ id: orderId, status: 'SIAP_PACKING' }], [orderId]],
+  [/SELECT status FROM public.picking_orders WHERE id = \$1 FOR UPDATE/, [{ status: 'SIAP_PACKING' }], [orderId]],
   [/FROM public.picking_packing p/, [{ ...checks, status: 'MENUNGGU_PACKING', revision: 1 }], [orderId]],
 ];
 
@@ -57,12 +57,15 @@ const finalizeUntilGate = (): Step[] => [
   [/UPDATE public.tags.+AUTHORIZED_OUT.+status = 'RESERVED'/s, [], [[tagId]]],
   [/UPDATE public.items.+AUTHORIZED_OUT.+status = 'RESERVED'/s, [], [[itemId]]],
   [/SELECT id FROM public.gate_passes/, [], [orderNumber]],
-  [/INSERT INTO public.gate_passes/],
+  [/INSERT INTO public.gate_passes/, [{ id: 'fixture-pass' }]],
 ];
 
 test('Packing finalization commits authorized EPCs, Gate Pass, audit and the shipping read model', async () => {
   const { packing, assertComplete } = fixture([
     ...finalizeUntilGate(),
+    [/GATE_PASS_AUTHORIZATION/, [], ['fixture-pass', JSON.stringify({
+      reference: orderNumber, units: [{ epc: 'A'.repeat(24), tag_id: tagId }], tag_ids: [tagId],
+    })]],
     [/INSERT INTO public.picking_packing_events/, [], [orderId, 2, 'PACKING_COMPLETED', session.id, 'Fixture', checks]],
     [/WITH order_base AS/, [{ id: orderId, status: 'DIKIRIM', shipping_stage: 'AUTHORIZED_OUT' }], [null, orderId, false]],
     [/FROM public.picking_packing p/, [{ ...checks, status: 'SELESAI_PACKING', revision: 2 }], [orderId]],

@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { warehouseSession } from '../warehouse-session';
 import { db } from '../../config/db';
-import { PickingError, ScanRejected, checklistInput, createOrderInput, orderIdInput, packingRevision, productIdInput, scanInput, statusInput } from './contract';
+import { PickingError, ScanRejected, cancellationInput, checklistInput, createOrderInput, orderIdInput, packingRevision, productIdInput, scanInput, statusInput } from './contract';
 import { PackingRepository } from './packing';
 import { PickingRepository } from './repository';
 
@@ -32,7 +32,9 @@ interface PickingOptions {
 }
 
 export async function orang1PickingRoutes(app: FastifyInstance, options: PickingOptions = {}) {
-  const repository = options.repository ?? new PickingRepository(db);
+  const repository = options.repository ?? new PickingRepository(db, {
+    cancellationApproved: process.env.DIGI_WMS_PICKING_CANCELLATION_APPROVED === 'true',
+  });
   const packing = options.packing ?? new PackingRepository(db);
   app.get('/api/picking/orders', async (request, reply) => {
     try {
@@ -67,6 +69,14 @@ export async function orang1PickingRoutes(app: FastifyInstance, options: Picking
       const session = pickingSession(request);
       const data = await repository.availableEpcs(orderIdInput(request.params.orderId), session);
       return { success: true, message: 'Daftar EPC tersedia untuk Picking.', data };
+    } catch (error) { return failure(request, reply, error); }
+  });
+  app.post<{ Params: { orderId: string } }>('/api/picking/orders/:orderId/cancel', async (request, reply) => {
+    try {
+      const session = pickingSession(request);
+      const orderId = orderIdInput(request.params.orderId);
+      const data = await repository.cancel(orderId, cancellationInput(request.body), session);
+      return { success: true, message: 'Pesanan picking dibatalkan.', data };
     } catch (error) { return failure(request, reply, error); }
   });
   app.post('/api/picking/scan', async (request, reply) => {

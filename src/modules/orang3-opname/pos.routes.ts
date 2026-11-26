@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { db, isPostgresConnected } from '../../config/db';
 import { authenticate, requireRoles } from '../../middleware/auth';
 import { publishRealtimeEvent } from '../../config/mqtt';
+import { pendingPosBoxEpcs } from '../gate-authorization';
 
 /**
  * MODUL ORANG 3: KASIR POS & MODUL RETUR
@@ -1057,6 +1058,7 @@ app.get(
                 item.tag_status === 'AUTHORIZED_OUT'
             )
             .map((item: any) => item.epc);
+          remainingEpcs.push(...await pendingPosBoxEpcs(client, invoiceNo));
 
           const needsReplacementGatePass = remainingEpcs.length > 0;
 
@@ -1339,6 +1341,7 @@ app.get(
             item.tag_status === 'AUTHORIZED_OUT'
         )
         .map((item: any) => item.epc);
+      recoveryEpcs.push(...await pendingPosBoxEpcs(client, invoiceNo));
 
       if (recoveryEpcs.length > 0) {
         const recoveryResponse = await app.inject({
