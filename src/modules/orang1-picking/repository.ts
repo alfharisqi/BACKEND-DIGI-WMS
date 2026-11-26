@@ -1,8 +1,85 @@
 import { Pool, PoolClient } from 'pg';
-import { PickingError, PickingStatus } from './contract';
+import { PickingError, PickingStatus, ScanRejected, cancellationInput, createOrderInput, pickingCancellationRole, pickingEpcPattern } from './contract';
 import { requireWarehouseAccount, type WarehouseSession } from '../warehouse-session';
+import { releasableReservation, releaseReservations, reservationJoins } from './cancellation-reservations';
 
 type Database = Pool | PoolClient;
+
+// Both read models use the same stock rule. The scan transaction rechecks it under locks.
+const eligibleUnits = (productFilter: string) => `
+    SELECT i.id AS item_id, i.product_id, t.id AS tag_id, t.epc,
+        t.status AS tag_status, i.status AS item_status,
+        l.id AS location_id, l.code AS location_code, l.name AS location_name
+    FROM public.items i
+    JOIN public.tags t ON t.id = i.tag_id
+    JOIN public.locations l ON l.id = i.location_id
+    WHERE i.status = 'IN_STOCK' AND t.status = 'IN_STOCK' AND l.location_type = 'RACK'
+        AND t.epc ~ '${pickingEpcPattern.source}'
+        AND ${productFilter}
+        AND NOT EXISTS (
+            SELECT 1 FROM public.picking_scans s
+            WHERE (s.item_id = i.id OR s.tag_id = t.id) AND s.released_at IS NULL
+        )`;
+
+const productStock = `
+WITH eligible_units AS (${eligibleUnits('i.product_id = ANY($1::uuid[])')}),
+stock AS (
+    SELECT product_id, count(*)::int AS available_qty FROM eligible_units GROUP BY product_id
+)
+SELECT p.id AS product_id, p.sku, p.name AS product_name, coalesce(stock.available_qty, 0) AS available_qty
+FROM public.products p LEFT JOIN stock ON stock.product_id = p.id
+WHERE p.id = ANY($1::uuid[])`;
+
+type ProductStock = { product_id: string; sku: string; product_name: string; available_qty: number };
+
+const cancellationFields = 'order_id, order_number, previous_status, reason, notes, actor_id, actor_name, cancelled_at, physical_return_confirmed, released_units';
+
+// Existing downstream documents can reference a Picking number directly or via
+// the Outbound UI's default resi. These checks are only a conservative veto.
+// Activation also requires the consumers to reject stale references by order UUID.
+const cancellableOrders = `
+SELECT o.id
+FROM public.picking_orders o
+WHERE o.id = ANY($1::uuid[]) AND (
+    (o.status = 'MENUNGGU_PICKING' AND NOT EXISTS (SELECT 1 FROM public.picking_scans s WHERE s.order_id = o.id))
+    OR (o.status = 'SEDANG_DIAMBIL'
+        AND EXISTS (SELECT 1 FROM public.picking_scans ps WHERE ps.order_id = o.id AND ps.released_at IS NULL)
+        AND NOT EXISTS (SELECT 1 FROM public.picking_scans ps ${reservationJoins}
+            WHERE ps.order_id = o.id AND ps.released_at IS NULL AND (${releasableReservation}) IS NOT TRUE))
+    )
+    AND NOT EXISTS (SELECT 1 FROM public.picking_packing p WHERE p.order_id = o.id)
+    AND NOT EXISTS (SELECT 1 FROM public.audit_logs a WHERE a.action = 'OUTBOUND_HANDOFF'
+        AND a.payload->>'source_type' = 'PICKING_ORANG1' AND a.payload->>'source_id' = o.id::text)
+    AND NOT EXISTS (SELECT 1 FROM public.outbound_picking_orders p WHERE p.order_number = o.order_number)
+    AND NOT EXISTS (SELECT 1 FROM public.sales s WHERE s.invoice_or_resi IN (o.order_number, 'RESI-' || o.order_number))
+    AND NOT EXISTS (SELECT 1 FROM public.gate_passes g WHERE g.reference_resi IN (o.order_number, 'RESI-' || o.order_number))
+    AND NOT EXISTS (SELECT 1 FROM public.stock_movements m WHERE m.reference_doc IN (o.order_number, 'RESI-' || o.order_number))`;
+
+async function cancellationSchemaReady(db: Database) {
+  const { rows: [schema] } = await db.query<{ ready: boolean }>(`
+    WITH audit AS (SELECT to_regclass('public.picking_cancellations') AS id)
+    SELECT coalesce(
+        has_table_privilege(audit.id, 'SELECT') AND has_table_privilege(audit.id, 'INSERT')
+        AND EXISTS (
+            SELECT 1 FROM pg_constraint c
+            WHERE c.conrelid = 'public.picking_orders'::regclass
+                AND c.conname = 'picking_orders_status_check' AND c.contype = 'c' AND c.convalidated
+                AND strpos(pg_get_constraintdef(c.oid), quote_literal('DIBATALKAN')) > 0
+        )
+        AND (
+            SELECT count(*) FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgenabled IN ('O', 'A') AND (
+              (t.tgrelid = 'public.picking_orders'::regclass AND t.tgname = 'picking_cancellation_terminal')
+              OR (t.tgrelid = 'public.picking_scans'::regclass AND t.tgname = 'picking_cancellation_reject_scan')
+              OR (t.tgrelid = 'public.tags'::regclass AND t.tgname = 'picking_cancellation_protect_reserved_tag')
+            )
+        ) = 3
+        AND (
+            SELECT count(*) FROM pg_attribute a WHERE a.attrelid = audit.id AND NOT a.attisdropped
+              AND a.attname IN ('physical_return_confirmed', 'released_units')
+        ) = 2, false
+    ) AS ready FROM audit`);
+  return schema?.ready === true;
+}
 
 const orderView = `
 WITH order_base AS (
@@ -47,25 +124,8 @@ WITH order_base AS (
 ), selected_lines AS (
     SELECT line.*
     FROM public.picking_order_lines line JOIN selected_orders o ON o.id = line.order_id
-), racks AS (
-    SELECT i.product_id, l.id, l.code, l.name, count(*)::int AS available_qty
-    FROM public.items i
-    JOIN public.tags t ON t.id = i.tag_id
-    JOIN public.locations l ON l.id = i.location_id
-    WHERE i.status = 'IN_STOCK' AND t.status = 'IN_STOCK' AND l.location_type = 'RACK'
-        AND i.product_id IN (SELECT product_id FROM selected_lines)
-        AND NOT EXISTS (
-            SELECT 1 FROM public.picking_scans s
-            WHERE (s.item_id = i.id OR s.tag_id = t.id) AND s.released_at IS NULL
-        )
-    GROUP BY i.product_id, l.id, l.code, l.name
-), rack_lists AS (
-    SELECT product_id, jsonb_agg(jsonb_build_object(
-        'id', id, 'code', code, 'name', name, 'available_qty', available_qty
-    ) ORDER BY code, id) AS locations
-    FROM racks GROUP BY product_id
 ), scan_lists AS (
-    SELECT s.order_id, s.product_id, count(*)::int AS picked_qty,
+    SELECT s.order_id, s.product_id, (count(*) FILTER (WHERE s.released_at IS NULL))::int AS picked_qty,
         jsonb_agg(jsonb_build_object(
             'id', s.id, 'epc', s.epc, 'item_id', s.item_id, 'tag_id', s.tag_id,
             'location_id', s.location_id, 'location_code', s.location_code,
@@ -77,28 +137,91 @@ WITH order_base AS (
     FROM public.picking_scans s JOIN selected_orders o ON o.id = s.order_id
     LEFT JOIN public.users scanner ON scanner.id = s.scanned_by
     GROUP BY s.order_id, s.product_id
+), line_progress AS (
+    SELECT line.*, coalesce(s.picked_qty, 0) AS picked_qty, coalesce(s.scans, '[]'::jsonb) AS scans,
+        greatest(line.requested_qty - coalesce(s.picked_qty, 0), 0) AS remaining_qty
+    FROM selected_lines line
+    LEFT JOIN scan_lists s ON s.order_id = line.order_id AND s.product_id = line.product_id
+), eligible_units AS (
+    ${eligibleUnits(`i.product_id IN (
+        SELECT line.product_id FROM line_progress line JOIN selected_orders o ON o.id = line.order_id
+        WHERE line.remaining_qty > 0 AND o.status IN ('MENUNGGU_PICKING', 'SEDANG_DIAMBIL')
+    )`)}
+), racks AS (
+    SELECT product_id, location_id, location_code, location_name, count(*)::int AS available_qty
+    FROM eligible_units GROUP BY product_id, location_id, location_code, location_name
+), rack_exclusions AS (
+    SELECT s.order_id, u.product_id, u.location_id, count(DISTINCT u.item_id)::int AS excluded_qty
+    FROM public.picking_scans s
+    JOIN selected_orders o ON o.id = s.order_id AND o.status IN ('MENUNGGU_PICKING', 'SEDANG_DIAMBIL')
+    JOIN eligible_units u ON u.item_id = s.item_id OR u.tag_id = s.tag_id
+    WHERE s.released_at IS NOT NULL
+    GROUP BY s.order_id, u.product_id, u.location_id
+), line_racks AS (
+    SELECT line.order_id, rack.*, rack.available_qty - coalesce(x.excluded_qty, 0) AS line_available_qty
+    FROM line_progress line
+    JOIN selected_orders o ON o.id = line.order_id
+    JOIN racks rack ON rack.product_id = line.product_id
+    LEFT JOIN rack_exclusions x ON x.order_id = line.order_id
+        AND x.product_id = rack.product_id AND x.location_id = rack.location_id
+    WHERE line.remaining_qty > 0 AND o.status IN ('MENUNGGU_PICKING', 'SEDANG_DIAMBIL')
+), rack_lists AS (
+    SELECT order_id, product_id, sum(line_available_qty)::int AS available_qty,
+        jsonb_agg(jsonb_build_object(
+            'id', location_id, 'code', location_code, 'name', location_name, 'available_qty', line_available_qty
+        ) ORDER BY location_code, location_id) AS locations
+    FROM line_racks WHERE line_available_qty > 0 GROUP BY order_id, product_id
+), candidate_lists AS (
+    SELECT line.order_id, line.product_id, picks.candidates
+    FROM line_progress line
+    JOIN selected_orders o ON o.id = line.order_id
+    CROSS JOIN LATERAL (
+        SELECT jsonb_agg(to_jsonb(unit) ORDER BY unit.location_code, unit.epc) AS candidates
+        FROM (
+            SELECT u.epc, u.tag_status, u.item_status, u.location_code, u.location_name
+            FROM eligible_units u
+            WHERE u.product_id = line.product_id AND NOT EXISTS (
+                SELECT 1 FROM public.picking_scans s
+                WHERE s.order_id = line.order_id AND (s.item_id = u.item_id OR s.tag_id = u.tag_id)
+            )
+            ORDER BY u.location_code, u.epc LIMIT line.remaining_qty
+        ) unit
+    ) picks
+    WHERE $3::boolean AND line.remaining_qty > 0 AND o.status IN ('MENUNGGU_PICKING', 'SEDANG_DIAMBIL')
 )
 SELECT o.id, o.order_number, o.status, o.shipping_stage, o.created_at, o.updated_at,
     coalesce(pack.status, 'MENUNGGU_PACKING') AS packing_status,
     sum(line.requested_qty)::float8 AS requested_qty,
-    sum(coalesce(s.picked_qty, 0))::float8 AS picked_qty,
+    sum(line.picked_qty)::float8 AS picked_qty,
     jsonb_agg(jsonb_build_object(
         'product_id', p.id, 'sku', p.sku, 'product_name', p.name,
-        'requested_qty', line.requested_qty, 'picked_qty', coalesce(s.picked_qty, 0),
+        'requested_qty', line.requested_qty, 'picked_qty', line.picked_qty, 'remaining_qty', line.remaining_qty,
+        'available_qty', coalesce(r.available_qty, 0),
+        'shortage_qty', CASE WHEN o.status IN ('MENUNGGU_PICKING', 'SEDANG_DIAMBIL')
+            THEN greatest(line.remaining_qty - coalesce(r.available_qty, 0), 0) ELSE 0 END,
         'locations', coalesce(r.locations, '[]'::jsonb),
-        'scans', coalesce(s.scans, '[]'::jsonb)
-    ) ORDER BY p.sku, p.id) AS lines
+        'scans', line.scans
+    ) || CASE WHEN $3::boolean THEN jsonb_build_object('candidates', coalesce(c.candidates, '[]'::jsonb))
+        ELSE '{}'::jsonb END ORDER BY p.sku, p.id) AS lines
 FROM selected_orders o
-JOIN selected_lines line ON line.order_id = o.id
+JOIN line_progress line ON line.order_id = o.id
 JOIN public.products p ON p.id = line.product_id
-LEFT JOIN rack_lists r ON r.product_id = line.product_id
-LEFT JOIN scan_lists s ON s.order_id = line.order_id AND s.product_id = line.product_id
+LEFT JOIN rack_lists r ON r.order_id = line.order_id AND r.product_id = line.product_id
+LEFT JOIN candidate_lists c ON c.order_id = line.order_id AND c.product_id = line.product_id
 LEFT JOIN public.picking_packing pack ON pack.order_id = o.id
 GROUP BY o.id, o.order_number, o.status, o.shipping_stage, o.created_at, o.updated_at, pack.status
 ORDER BY o.created_at, o.id`;
 
-export async function selectOrders(db: Database, status: PickingStatus | null, orderId: string | null) {
-  return (await db.query(orderView, [status, orderId])).rows;
+export async function selectOrders(db: Database, status: PickingStatus | null, orderId: string | null, candidates = false) {
+  const { rows } = await db.query(orderView, [status, orderId, candidates]);
+  const cancelledIds = rows.filter(order => order.status === 'DIBATALKAN').map(order => order.id);
+  if (!cancelledIds.length) return rows;
+  const audits = await db.query(`
+    SELECT ${cancellationFields} FROM public.picking_cancellations WHERE order_id = ANY($1::uuid[])`, [cancelledIds]);
+  const cancellations = new Map(audits.rows.map(audit => [audit.order_id, audit]));
+  return rows.map(order => order.status === 'DIBATALKAN'
+    ? { ...order, cancellation: cancellations.get(order.id) ?? null }
+    : order);
 }
 
 export async function verifyPickingAccount(db: Database, session: WarehouseSession, lock = false) {
@@ -109,11 +232,124 @@ export async function verifyPickingAccount(db: Database, session: WarehouseSessi
 }
 
 export class PickingRepository {
-  constructor(private readonly pool: Pool) {}
+  // The emergency switch and schema checks also apply when calling the repository directly.
+  constructor(
+    private readonly pool: Pool,
+    private readonly options: { cancellationApproved?: boolean } = {},
+  ) {}
 
   async orders(status: PickingStatus | null, session: WarehouseSession) {
     await verifyPickingAccount(this.pool, session);
-    return selectOrders(this.pool, status, null);
+    const orders = await selectOrders(this.pool, status, null);
+    const candidates = orders.filter(order => ['MENUNGGU_PICKING', 'SEDANG_DIAMBIL'].includes(order.status)).map(order => order.id);
+    const eligible = new Set<string>();
+    if (candidates.length && session.role === pickingCancellationRole && this.options.cancellationApproved !== false
+      && await cancellationSchemaReady(this.pool)) {
+      const { rows } = await this.pool.query<{ id: string }>(cancellableOrders, [candidates]);
+      rows.forEach(row => eligible.add(row.id));
+    }
+    return orders.map(order => ({ ...order, can_cancel: eligible.has(order.id) }));
+  }
+
+  async cancel(orderId: string, input: ReturnType<typeof cancellationInput>, session: WarehouseSession) {
+    if (session.role !== pickingCancellationRole) throw new PickingError(403, 'Akun ini tidak berwenang membatalkan pesanan picking.');
+    if (this.options.cancellationApproved === false) throw new PickingError(503, 'Pembatalan pesanan picking belum diaktifkan.');
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      const actor = await verifyPickingAccount(client, session, true);
+      if (!await cancellationSchemaReady(client)) {
+        throw new PickingError(503, 'Skema pembatalan pesanan picking belum siap.');
+      }
+      const { rows: [order] } = await client.query<{ status: PickingStatus; order_number: string }>(
+        'SELECT status, order_number FROM public.picking_orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (!order) throw new PickingError(404, 'Pesanan picking tidak ditemukan.');
+      const partial = order.status === 'SEDANG_DIAMBIL';
+      if (!partial && order.status !== 'MENUNGGU_PICKING') {
+        throw new PickingError(409, 'Pesanan sudah melewati tahap Picking atau sudah dibatalkan.');
+      }
+
+      // This is a separate statement after acquiring the order lock so it sees
+      // scan/packing records committed while cancellation waited for that lock.
+      const eligible = await client.query(cancellableOrders, [[orderId]]);
+      if (eligible.rowCount !== 1) {
+        throw new PickingError(409, 'Pesanan memiliki histori yang menghalangi pembatalan atau reservasi yang tidak dapat dilepas.');
+      }
+      if (partial !== input.physicalReturnConfirmed) {
+        throw new PickingError(400, partial
+          ? 'Konfirmasi pengembalian fisik seluruh EPC ke rak sebelum membatalkan.'
+          : 'Pesanan Menunggu Picking tidak memiliki EPC untuk dikembalikan.');
+      }
+      const released = partial ? await releaseReservations(client, orderId, input.returnScanIds) : [];
+      const updated = await client.query(`
+        UPDATE public.picking_orders SET status = 'DIBATALKAN', updated_at = now()
+        WHERE id = $1 AND status = $2`, [orderId, order.status]);
+      if (updated.rowCount !== 1) throw new PickingError(409, 'Status pesanan telah berubah.');
+      const { rows: [cancellation] } = await client.query(`
+        INSERT INTO public.picking_cancellations
+          (order_id, order_number, previous_status, reason, notes, actor_id, actor_name, physical_return_confirmed, released_units)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb) RETURNING ${cancellationFields}`,
+      [orderId, order.order_number, order.status, input.reason, input.notes, session.id, actor.name, partial, JSON.stringify(released)]);
+      if (!cancellation) throw new PickingError(500, 'Audit pembatalan belum tersimpan.');
+      await client.query('COMMIT');
+      return { id: orderId, status: 'DIBATALKAN', can_cancel: false, cancellation };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async availability(productId: string, session: WarehouseSession) {
+    await verifyPickingAccount(this.pool, session);
+    const { rows: [product] } = await this.pool.query<ProductStock>(productStock, [[productId]]);
+    if (!product) throw new PickingError(404, 'Produk tidak ditemukan.');
+    return product;
+  }
+
+  async availableEpcs(orderId: string, session: WarehouseSession) {
+    await verifyPickingAccount(this.pool, session);
+    const [order] = await selectOrders(this.pool, null, orderId, true);
+    if (!order) throw new PickingError(404, 'Pesanan picking tidak ditemukan.');
+    return { order_id: order.id, lines: order.lines };
+  }
+
+  async create({ orderNumber, lines }: ReturnType<typeof createOrderInput>, session: WarehouseSession) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      await verifyPickingAccount(client, session, true);
+      const { rows } = await client.query<ProductStock>(productStock, [lines.map(line => line.productId)]);
+      const stock = new Map(rows.map(product => [product.product_id, product]));
+      for (const { productId, quantity } of lines) {
+        const product = stock.get(productId);
+        if (!product) throw new PickingError(404, 'Produk pada pesanan tidak ditemukan.');
+        if (quantity > product.available_qty) {
+          throw new PickingError(409, `Stok ${product.product_name} tidak mencukupi. Diminta ${quantity} unit, tersedia ${product.available_qty} unit.`);
+        }
+      }
+      const { rows: [{ id }] } = await client.query<{ id: string }>(
+        `INSERT INTO public.picking_orders (order_number, status)
+         VALUES ($1, 'MENUNGGU_PICKING') RETURNING id`, [orderNumber]);
+      await client.query(`
+        INSERT INTO public.picking_order_lines (order_id, product_id, requested_qty)
+        SELECT $1::uuid, line.product_id, line.quantity
+        FROM unnest($2::uuid[], $3::int[]) AS line(product_id, quantity)`,
+      [id, lines.map(line => line.productId), lines.map(line => line.quantity)]);
+      const [created] = await selectOrders(client, null, id);
+      if (!created) throw new PickingError(500, 'Pesanan yang dibuat tidak dapat dibaca.');
+      await client.query('COMMIT');
+      return created;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async reserve(orderId: string, epc: string, session: WarehouseSession) {
@@ -128,42 +364,46 @@ export class PickingRepository {
         'SELECT status FROM public.picking_orders WHERE id = $1 FOR UPDATE', [orderId],
       )).rows[0];
       if (!order) throw new PickingError(404, 'Pesanan picking tidak ditemukan.');
-      if (order.status === 'SIAP_PACKING') throw new PickingError(409, 'Seluruh kuantitas pesanan sudah terpenuhi.');
+      if (order.status !== 'MENUNGGU_PICKING' && order.status !== 'SEDANG_DIAMBIL') {
+        throw new PickingError(409, order.status === 'SIAP_PACKING'
+          ? 'Seluruh kuantitas pesanan sudah terpenuhi.' : 'Pesanan tidak dapat diproses untuk Picking.');
+      }
 
       // Lock the same tag and item rows that downstream transactions must lock.
       const tag = (await client.query<{ id: string; status: string; epc: string }>(
         'SELECT id, status, epc FROM public.tags WHERE epc = $1 FOR UPDATE', [epc],
       )).rows[0];
-      if (!tag) throw new PickingError(404, 'EPC tidak terdaftar.');
+      if (!tag) throw new ScanRejected(404, 'EPC tidak terdaftar.');
       const item = (await client.query<{ id: string; product_id: string; status: string; location_id: string | null }>(
         'SELECT id, product_id, status, location_id FROM public.items WHERE tag_id = $1 FOR UPDATE', [tag.id],
       )).rows[0];
-      if (!item) throw new PickingError(409, 'EPC belum terhubung ke unit barang.');
+      if (!item) throw new ScanRejected(409, 'EPC belum terhubung ke unit barang.');
 
       const duplicate = await client.query(`
         SELECT order_id FROM public.picking_scans
         WHERE (item_id = $1 OR tag_id = $2) AND (released_at IS NULL OR order_id = $3)
         ORDER BY (order_id = $3) DESC LIMIT 1`, [item.id, tag.id, orderId]);
-      if (duplicate.rows[0]?.order_id === orderId) throw new PickingError(409, 'EPC ini sudah dipindai untuk pesanan ini.');
-      if (duplicate.rowCount) throw new PickingError(409, 'Barang sudah direservasi untuk pesanan lain.');
+      if (duplicate.rows[0]?.order_id === orderId) throw new ScanRejected(409, 'EPC ini sudah dipindai untuk pesanan ini.');
+      if (duplicate.rowCount) throw new ScanRejected(409, 'Barang sudah direservasi untuk pesanan lain.');
 
       const line = (await client.query<{ requested_qty: number }>(
         'SELECT requested_qty FROM public.picking_order_lines WHERE order_id = $1 AND product_id = $2 FOR UPDATE',
         [orderId, item.product_id],
       )).rows[0];
-      if (!line) throw new PickingError(409, 'Produk pada EPC tidak sesuai dengan pesanan.');
+      if (!line) throw new ScanRejected(409, 'Produk pada EPC tidak sesuai dengan pesanan.');
       if (tag.status !== 'IN_STOCK' || item.status !== 'IN_STOCK') {
-        throw new PickingError(409, 'Tag dan item harus berstatus IN_STOCK agar dapat diambil.');
+        throw new ScanRejected(409, 'Tag dan item harus berstatus IN_STOCK agar dapat diambil.');
       }
       const rack = (await client.query<{ id: string; code: string; name: string }>(`
         SELECT id, code, name FROM public.locations
         WHERE id = $1 AND location_type = 'RACK' FOR SHARE`, [item.location_id])).rows[0];
-      if (!rack) throw new PickingError(409, 'Unit belum berada di rak penyimpanan yang valid.');
+      if (!rack) throw new ScanRejected(409, 'Unit belum berada di rak penyimpanan yang valid.');
 
       const picked = (await client.query<{ qty: number }>(`
-        SELECT count(*)::int AS qty FROM public.picking_scans WHERE order_id = $1 AND product_id = $2`,
+        SELECT count(*)::int AS qty FROM public.picking_scans
+        WHERE order_id = $1 AND product_id = $2 AND released_at IS NULL`,
       [orderId, item.product_id])).rows[0].qty;
-      if (picked >= line.requested_qty) throw new PickingError(409, 'Kuantitas SKU ini sudah terpenuhi.');
+      if (picked >= line.requested_qty) throw new ScanRejected(409, 'Kuantitas SKU ini sudah terpenuhi.');
 
       const updatedTag = await client.query(`
         UPDATE public.tags SET status = 'RESERVED', updated_at = now()
@@ -172,7 +412,7 @@ export class PickingRepository {
         UPDATE public.items SET status = 'RESERVED', updated_at = now()
         WHERE id = $1 AND status = 'IN_STOCK'`, [item.id]);
       if (updatedTag.rowCount !== 1 || updatedItem.rowCount !== 1) {
-        throw new PickingError(409, 'Ketersediaan unit berubah. Muat ulang pesanan dan coba lagi.');
+        throw new ScanRejected(409, 'Ketersediaan unit berubah. Muat ulang pesanan dan coba lagi.');
       }
       const scan = (await client.query(`
         INSERT INTO public.picking_scans
@@ -186,7 +426,7 @@ export class PickingRepository {
             SELECT 1 FROM public.picking_order_lines line
             WHERE line.order_id = o.id AND line.requested_qty > (
                 SELECT count(*) FROM public.picking_scans s
-                WHERE s.order_id = line.order_id AND s.product_id = line.product_id
+                WHERE s.order_id = line.order_id AND s.product_id = line.product_id AND s.released_at IS NULL
             )
         ) THEN 'SEDANG_DIAMBIL' ELSE 'SIAP_PACKING' END, updated_at = now()
         WHERE o.id = $1`, [orderId]);

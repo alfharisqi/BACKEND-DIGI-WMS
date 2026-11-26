@@ -5,6 +5,8 @@ import { db, isPostgresConnected, memoryStore, getCalculatedLedgerStock } from '
 import { mqttClient, publishRealtimeEvent } from '../../config/mqtt';
 import { generateToken, authenticate, requireRoles } from '../../middleware/auth';
 import { registerBoxRoutes } from './boxes.routes';
+import { GateAuthorizationError, lockGateAuthorization, recordGateAuthorization } from '../gate-authorization';
+import { uuidPattern } from '../orang1-picking/contract';
 
 /**
  * ============================================================================
@@ -974,6 +976,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     try {
       await client.query('BEGIN');
       txStarted = true;
+      await client.query("SET LOCAL lock_timeout = '5s'");
 
       // 1. Cari tag & item berdasarkan EPC
       const tagRes = await client.query(
@@ -1109,16 +1112,31 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
          ) AS reference_doc`,
         [tagRow.tag_id]
       );
-      const referenceDoc: string | null = refRes.rows[0]?.reference_doc || null;
+      let referenceDoc: string | null = refRes.rows[0]?.reference_doc || null;
 
       // Cari atau buat Gate Pass terkait secara otomatis di belakang layar
       let activePass: Record<string, any> | null = null;
-      if (referenceDoc) {
+      const { rows: [authorization] } = await client.query<{
+        entity_id: string; units: Array<{ epc: string; tag_id?: string; box_id?: string }>;
+      }>(`
+        SELECT entity_id, payload->'units' AS units FROM public.audit_logs
+        WHERE action = 'GATE_PASS_AUTHORIZATION' AND (payload->'tag_ids') ? $1::text
+        ORDER BY created_at DESC, id DESC LIMIT 1`, [tagRow.tag_id]);
+      if (authorization) {
+        const { rows: [pass] } = await client.query(`
+          SELECT * FROM public.gate_passes WHERE id = $1 AND status = 'ACTIVE' AND valid_until > now()
+          FOR UPDATE NOWAIT`, [authorization.entity_id]);
+        if (!pass || !authorization.units.some(unit => unit.tag_id === tagRow.tag_id && unit.epc === rawEpc)) {
+          throw new GateAuthorizationError(409, 'EPC ini tidak memiliki Gate Pass aktif yang cocok.');
+        }
+        activePass = pass;
+        referenceDoc = pass.reference_resi;
+      } else if (referenceDoc) {
         const gpRes = await client.query(
           `SELECT * FROM public.gate_passes
            WHERE reference_resi = $1 AND status = 'ACTIVE'
            ORDER BY created_at DESC LIMIT 1
-           FOR UPDATE`,
+           FOR UPDATE NOWAIT`,
           [referenceDoc]
         );
         activePass = gpRes.rows[0] || null;
@@ -1147,7 +1165,16 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
       // Cek apakah semua EPC lain pada dokumen yang sama sudah EXITED; jika sudah, tandai Gate Pass USED & Sales SHIPPED
       if (referenceDoc && activePass?.status === 'ACTIVE') {
-        const remainingAuthRes = await client.query(
+        const remainingAuthRes = authorization ? await client.query(`
+          SELECT count(*)::int AS remaining
+          FROM jsonb_to_recordset($1::jsonb) AS unit(epc text, tag_id uuid, box_id uuid)
+          WHERE unit.epc <> $2 AND (
+            EXISTS (SELECT 1 FROM public.tags t WHERE t.id = unit.tag_id AND t.status = 'AUTHORIZED_OUT')
+            OR (unit.box_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM public.gate_events g WHERE g.gate_pass_id = $3 AND g.epc = unit.epc
+                AND g.direction = 'OUT' AND g.authorization_status = 'AUTHORIZED_OUT'
+            ))
+          )`, [JSON.stringify(authorization.units), rawEpc, activePass.id]) : await client.query(
           `SELECT COUNT(*)::int AS remaining
            FROM public.tags t
            WHERE t.status = 'AUTHORIZED_OUT'
@@ -1189,7 +1216,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
            id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
            direction, authorization_status, action_taken, gate_pass_id, event_time
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'AUTHORIZED_OUT', 'Lolos Sensor RFID Gerbang (Otomatis via EPC)', $8, NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'AUTHORIZED_OUT', 'Lolos Sensor RFID Gerbang (Otomatis via EPC)', $8, clock_timestamp())`,
         [
           eventId,
           gate_id,
@@ -1233,6 +1260,10 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       if (txStarted) {
         await client.query('ROLLBACK').catch(() => undefined);
       }
+      if (err instanceof GateAuthorizationError || ['55P03', '40P01', '40001'].includes(err.code)) {
+        return reply.code(409).send({ status: 'error', success: false, message: err instanceof GateAuthorizationError
+          ? err.message : 'Gate Pass sedang diproses. Ulangi scan.' });
+      }
       console.error('[Orang 4 Direct EPC Gate Scan Error]:', err.message);
       return reply.code(500).send({
         status: 'error',
@@ -1249,62 +1280,85 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     const body = (request.body as Record<string, any>) || {};
     const {
       sale_id,
-      reference_resi,
+      reference_resi: rawReference,
       reference_type = 'OUTBOUND_SHIPMENT',
       customer_or_destination,
       courier,
-      epc_list = [],
+      epc_list: rawEpcs = [],
       authorized_by,
       valid_hours = 24,
     } = body;
 
-    if (!reference_resi && !sale_id) {
+    const reference_resi = typeof rawReference === 'string' ? rawReference.trim() : '';
+    if ((!reference_resi && !sale_id) || (sale_id && (typeof sale_id !== 'string' || !uuidPattern.test(sale_id)))
+      || !Array.isArray(rawEpcs) || rawEpcs.some(epc => typeof epc !== 'string' || !epc.trim())) {
       return reply.code(400).send({
         status: 'error',
         success: false,
-        message: 'Nomor resi/invoice atau sale_id wajib diisi untuk menerbitkan Gate Pass',
+        message: 'Isi nomor resi/invoice atau sale_id dan daftar EPC yang valid untuk menerbitkan Gate Pass.',
       });
     }
 
+    const epc_list = [...new Set(rawEpcs.map(epc => epc.trim().toUpperCase()))];
     const uniqueId = crypto.randomUUID();
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const pass_code = `GP-${Date.now().toString().slice(-4)}-${randomSuffix}`;
     const validUntilDate = new Date(Date.now() + Number(valid_hours) * 3600 * 1000);
+    if (!Number.isFinite(validUntilDate.valueOf()) || Number(valid_hours) <= 0) {
+      return reply.code(400).send({ status: 'error', success: false, message: 'Masa berlaku Gate Pass tidak valid.' });
+    }
 
     let createdPass: Record<string, any>;
 
     if (isPostgresConnected) {
+      let client;
       try {
-        const insertRes = await db.query(
-          `INSERT INTO gate_passes (id, pass_code, sale_id, reference_resi, authorized_by, status, valid_until, created_at)
+        client = await db.connect();
+        await client.query('BEGIN');
+        await client.query("SET LOCAL lock_timeout = '5s'");
+        const authorization = await lockGateAuthorization(client, {
+          saleId: sale_id || null, reference: reference_resi, epcs: epc_list,
+        });
+        const insertRes = await client.query(
+          `INSERT INTO public.gate_passes (id, pass_code, sale_id, reference_resi, authorized_by, status, valid_until, created_at)
            VALUES ($1, $2, $3, $4, $5, 'ACTIVE', $6, NOW())
            RETURNING *`,
-          [uniqueId, pass_code, sale_id || null, reference_resi || `REF-${randomSuffix}`, authorized_by || null, validUntilDate]
+          [uniqueId, pass_code, authorization.saleId, authorization.reference, authorized_by || null, validUntilDate]
         );
         createdPass = insertRes.rows[0];
-
-        // Jika terdapat daftar tag RFID yang dibawa keluar, perbarui status menjadi AUTHORIZED_OUT
-        if (Array.isArray(epc_list) && epc_list.length > 0) {
-          await db.query(
-            `UPDATE tags SET status = 'AUTHORIZED_OUT', updated_at = NOW() WHERE epc = ANY($1)`,
-            [epc_list]
+        if (authorization.tags.length) {
+          await client.query(
+            `UPDATE public.tags SET status = 'AUTHORIZED_OUT', updated_at = NOW() WHERE id = ANY($1::uuid[])`,
+            [authorization.tags.map(tag => tag.tag_id)]
+          );
+          await client.query(
+            `UPDATE public.items SET status = 'AUTHORIZED_OUT', updated_at = NOW() WHERE id = ANY($1::uuid[])`,
+            [authorization.tags.map(tag => tag.item_id)]
           );
         }
-
-        // Jika sale_id disediakan, perbarui status shipping di sales
-        if (sale_id) {
-          await db.query(
-            `UPDATE sales SET shipping_status = 'GATE_PASS_ISSUED' WHERE id = $1`,
-            [sale_id]
+        await recordGateAuthorization(client, createdPass.id, authorization.units, authorization.reference);
+        if (authorization.saleId && authorization.units.length) {
+          await client.query(
+            `UPDATE public.sales SET shipping_status = 'GATE_PASS_ISSUED' WHERE id = $1`,
+            [authorization.saleId]
           );
         }
-      } catch (err: any) {
-        console.error('[Orang 4 Gate Pass Generate Error]:', err.message);
-        return reply.code(500).send({
+        await client.query('COMMIT');
+      } catch (error) {
+        await client?.query('ROLLBACK').catch(() => undefined);
+        const code = (error as { code?: string } | null)?.code ?? '';
+        const conflict = ['55P03', '40P01', '40001', '23505'].includes(code);
+        const expected = error instanceof GateAuthorizationError;
+        if (!expected && !conflict) request.log.error({ code }, 'Penerbitan Gate Pass gagal');
+        return reply.code(expected ? error.statusCode : conflict ? 409 : 500).send({
           status: 'error',
           success: false,
-          message: `Gagal menerbitkan Gate Pass: ${err.message}`,
+          message: expected ? error.message : conflict
+            ? 'Penerbitan Gate Pass berbenturan dengan transaksi lain. Muat ulang data dan coba kembali.'
+            : 'Gagal menerbitkan Gate Pass.',
         });
+      } finally {
+        client?.release();
       }
     } else {
       createdPass = {
@@ -1522,7 +1576,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     }
 
     const normalizedInputEpcs: string[] = rawEpcsInput.map((item: string) =>
-      item.trim()
+      item.trim().toUpperCase()
     );
 
     if (new Set(normalizedInputEpcs).size !== normalizedInputEpcs.length) {
@@ -1542,6 +1596,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       try {
         await client.query('BEGIN');
         txStarted = true;
+        await client.query("SET LOCAL lock_timeout = '5s'");
 
         // 1. Cari & kunci Gate Pass agar tidak dapat diproses paralel
         const findRes = await client.query(
@@ -1656,8 +1711,24 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         // - Jika caller mengirim scanned_epcs, wajib validasi seluruh EPC yang dikirim.
         // - Jika caller tidak mengirim scanned_epcs (mis. klik cepat dari UI tanpa daftar EPC),
         //   gunakan activeRegisteredEpcs dari dokumen Gate Pass jika dokumen tersebut tercatat di stock_movements.
+        const { rows: [manifest] } = await client.query<{
+          units: Array<{ epc: string; tag_id?: string; box_id?: string }>; created_at: Date;
+        }>(`
+          SELECT payload->'units' AS units, created_at FROM public.audit_logs
+          WHERE action = 'GATE_PASS_AUTHORIZATION' AND entity_id = $1
+          ORDER BY created_at DESC, id DESC LIMIT 1`, [pass.id]);
+        const passUnits = new Map(manifest?.units.map(unit => [unit.epc, unit]));
+        if (manifest && normalizedInputEpcs.some(epc => !passUnits.has(epc))) {
+          throw new GateAuthorizationError(409, 'Ada EPC yang tidak tercantum pada Gate Pass ini.');
+        }
+        const remainingUnits = manifest ? (await client.query<{ epc: string }>(`
+          SELECT DISTINCT epc FROM public.gate_events WHERE gate_pass_id = $1
+            AND direction = 'OUT' AND authorization_status = 'AUTHORIZED_OUT'`, [pass.id])).rows : [];
+        const alreadyScanned = new Set(remainingUnits.map(row => row.epc));
         let epcsToProcess: string[] = normalizedInputEpcs;
-        if (epcsToProcess.length === 0 && docMovementMap.size > 0) {
+        if (manifest && epcsToProcess.length === 0) {
+          epcsToProcess = manifest.units.filter(unit => !alreadyScanned.has(unit.epc)).map(unit => unit.epc);
+        } else if (!manifest && epcsToProcess.length === 0 && docMovementMap.size > 0) {
           if (activeRegisteredEpcs.length === 0) {
             await client.query('ROLLBACK');
             txStarted = false;
@@ -1706,7 +1777,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
              FROM public.boxes b
              INNER JOIN public.products p ON p.id = b.product_id
              WHERE b.master_epc = ANY($1::text[])
-             FOR UPDATE OF b`,
+             ORDER BY b.master_epc FOR UPDATE OF b`,
             [epcsToProcess]
           );
 
@@ -1721,12 +1792,40 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
              FROM public.gate_events
              WHERE epc = ANY($1::text[])
                AND direction = 'OUT'
-               AND authorization_status = 'AUTHORIZED_OUT'`,
-            [epcsToProcess]
+               AND authorization_status = 'AUTHORIZED_OUT'
+               AND ($2::timestamptz IS NULL OR event_time >= $2)`,
+            [epcsToProcess, manifest?.created_at ?? null]
           );
           const alreadyExitedEpcs = new Set(
             exitedEventsRes.rows.map((r) => String(r.epc).trim())
           );
+
+          if (manifest) {
+            if (epcsToProcess.some(epc => {
+              const unit = passUnits.get(epc);
+              return unit?.tag_id ? unit.tag_id !== tagItemMap.get(epc)?.tag_id
+                : unit?.box_id !== boxItemMap.get(epc)?.box_id;
+            })) {
+              throw new GateAuthorizationError(409, 'Identitas EPC telah berubah. Periksa barang dan Gate Pass.');
+            }
+          }
+          const { rows: superseded } = await client.query(`
+            SELECT 1 FROM public.audit_logs newer
+            JOIN public.gate_passes selected ON selected.id = $1
+            LEFT JOIN LATERAL (
+              SELECT created_at, id FROM public.audit_logs
+              WHERE action = 'GATE_PASS_AUTHORIZATION' AND entity_id = selected.id::text
+              ORDER BY created_at DESC, id DESC LIMIT 1
+            ) original ON true
+            CROSS JOIN LATERAL jsonb_array_elements(newer.payload->'units') AS unit(value)
+            WHERE newer.action = 'GATE_PASS_AUTHORIZATION' AND newer.entity_id <> selected.id::text
+              AND (CASE WHEN original.id IS NULL THEN newer.created_at >= selected.created_at
+                ELSE (newer.created_at, newer.id) > (original.created_at, original.id) END)
+              AND unit.value->>'epc' = ANY($2::text[])
+            LIMIT 1`, [pass.id, epcsToProcess]);
+          if (superseded.length) {
+            throw new GateAuthorizationError(409, 'Otorisasi EPC telah berubah. Gunakan Gate Pass yang terbaru.');
+          }
 
           for (const scannedEpc of epcsToProcess) {
             const tagRow = tagItemMap.get(scannedEpc);
@@ -1734,6 +1833,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
             // Jika EPC milik Box (Master/Inner Box), validasi khusus Box
             if (!tagRow && boxRow) {
+              if (manifest && boxRow.box_status !== 'SHIPPED') {
+                throw new GateAuthorizationError(409, `Box ${boxRow.box_code} tidak lagi siap keluar.`);
+              }
               if (alreadyExitedEpcs.has(scannedEpc)) {
                 await client.query('ROLLBACK');
                 txStarted = false;
@@ -1771,7 +1873,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
             }
 
             // Validasi 2: Setiap EPC harus benar-benar terdaftar pada Gate Pass yang digunakan
-            if (docMovementMap.size > 0 && (!docRecord || docRecord.sold_qty <= 0)) {
+            if (!manifest && docMovementMap.size > 0 && (!docRecord || docRecord.sold_qty <= 0)) {
               await client.query('ROLLBACK');
               txStarted = false;
               return reply.code(409).send({
@@ -1783,7 +1885,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
             // Validasi 2b: Bahkan jika Gate Pass dibuat manual tanpa stock_movements,
             // cek apakah EPC ini milik dokumen lain atau sudah pernah diretur sebagai stok aktif
-            if (docMovementMap.size === 0 && referenceDoc) {
+            if (!manifest && docMovementMap.size === 0 && referenceDoc) {
               const otherDocRes = await client.query(
                 `SELECT reference_doc, movement_type
                  FROM public.stock_movements
@@ -1853,19 +1955,15 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
             }
           }
 
-          // 5. Semua EPC valid -> Perbarui status Gate Pass menjadi USED
-          const updatePassRes = await client.query(
-            `UPDATE public.gate_passes
-             SET status = 'USED', used_at = NOW()
-             WHERE id = $1 AND status = 'ACTIVE'
-             RETURNING *`,
-            [pass.id]
-          );
-
-          if (updatePassRes.rows.length === 0) {
-            throw new Error(`Gagal memperbarui status Gate Pass ${pass.pass_code}.`);
+          updatedPass = pass;
+          const scanned = new Set([...alreadyScanned, ...epcsToProcess]);
+          if (!manifest || manifest.units.every(unit => scanned.has(unit.epc))) {
+            const { rows: [usedPass] } = await client.query(`
+              UPDATE public.gate_passes SET status = 'USED', used_at = NOW()
+              WHERE id = $1 AND status = 'ACTIVE' RETURNING *`, [pass.id]);
+            if (!usedPass) throw new Error(`Gagal memperbarui status Gate Pass ${pass.pass_code}.`);
+            updatedPass = usedPass;
           }
-          updatedPass = updatePassRes.rows[0];
 
           // 6. Perbarui status tags menjadi EXITED & items menjadi EXITED
           await client.query(
@@ -1900,7 +1998,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
                  id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
                  direction, authorization_status, action_taken, gate_pass_id, event_time
                )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $8, NOW())`,
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'OUT', 'AUTHORIZED_OUT', 'Lolos Verifikasi Gate Pass Resmi', $8, clock_timestamp())`,
               [
                 crypto.randomUUID(),
                 gate_id,
@@ -1942,18 +2040,26 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           );
         }
 
-        await client.query(
-          `UPDATE public.sales
-           SET shipping_status = 'SHIPPED / TELAH KELUAR'
-           WHERE id = $1 OR invoice_or_resi = $2`,
-          [pass.sale_id || null, referenceDoc || pass.reference_resi || null]
-        );
+        if (updatedPass?.status === 'USED' && (!manifest || manifest.units.length)) {
+          await client.query(
+            `UPDATE public.sales
+             SET shipping_status = 'SHIPPED / TELAH KELUAR'
+             WHERE id = $1 OR invoice_or_resi = $2`,
+            [pass.sale_id || null, referenceDoc || pass.reference_resi || null]
+          );
+        }
 
         await client.query('COMMIT');
         txStarted = false;
       } catch (err: any) {
         if (txStarted) {
           await client.query('ROLLBACK').catch(() => undefined);
+        }
+        if (err instanceof GateAuthorizationError) {
+          return reply.code(err.statusCode).send({ status: 'error', success: false, message: err.message });
+        }
+        if (['55P03', '40P01', '40001'].includes(err.code)) {
+          return reply.code(409).send({ status: 'error', success: false, message: 'Gate Pass sedang diproses. Ulangi scan.' });
         }
         console.error('[Orang 4 Gate Scan-Out Error]:', err.message);
         return reply.code(500).send({
@@ -2057,7 +2163,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     return reply.send({
       status: 'ok',
       success: true,
-      message: `Konfirmasi berhasil! Barang telah resmi keluar melewati ${gate_id}. Status Gate Pass kini: USED.`,
+      message: `Konfirmasi berhasil! Barang telah resmi keluar melewati ${gate_id}. Status Gate Pass kini: ${updatedPass?.status}.`,
       data: updatedPass,
     });
   });
