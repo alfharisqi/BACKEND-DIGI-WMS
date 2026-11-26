@@ -39,23 +39,141 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
       }
 
       const result = await db.query(`
+        WITH item_agg AS (
+          SELECT
+            i.location_id,
+            COUNT(i.id)::INT AS unit_items_count
+          FROM items i
+          WHERE i.location_id IS NOT NULL
+            AND i.status IN ('IN_STOCK', 'RESERVED', 'AUTHORIZED_OUT')
+          GROUP BY i.location_id
+        ),
+        box_agg AS (
+          SELECT
+            b.location_id,
+            COUNT(b.id)::INT AS box_count,
+            COALESCE(SUM(b.qty_per_box), 0)::INT AS box_units_count,
+            COALESCE(
+              json_agg(
+                json_build_object(
+                  'id', b.id,
+                  'box_code', b.box_code,
+                  'master_epc', b.master_epc,
+                  'box_level', COALESCE(b.box_level, 'INNER'),
+                  'qty_per_box', b.qty_per_box,
+                  'inner_box_count', COALESCE(b.inner_box_count, 0),
+                  'qty_per_inner', COALESCE(b.qty_per_inner, b.qty_per_box),
+                  'sku', p.sku,
+                  'product_name', p.name,
+                  'status', b.status
+                )
+                ORDER BY COALESCE(b.box_level, 'INNER') DESC, b.box_code ASC
+              ),
+              '[]'::json
+            ) AS boxes
+          FROM boxes b
+          INNER JOIN products p ON p.id = b.product_id
+          WHERE b.location_id IS NOT NULL
+            AND b.status = 'IN_RACK'
+          GROUP BY b.location_id
+        ),
+        prod_combined AS (
+          SELECT
+            i.location_id,
+            p.id AS product_id,
+            p.sku,
+            p.name AS product_name,
+            COUNT(i.id)::INT AS unit_qty,
+            0::INT AS box_count,
+            0::INT AS box_qty
+          FROM items i
+          INNER JOIN products p ON p.id = i.product_id
+          WHERE i.location_id IS NOT NULL
+            AND i.status IN ('IN_STOCK', 'RESERVED', 'AUTHORIZED_OUT')
+          GROUP BY i.location_id, p.id, p.sku, p.name
+          UNION ALL
+          SELECT
+            b.location_id,
+            p.id AS product_id,
+            p.sku,
+            p.name AS product_name,
+            0::INT AS unit_qty,
+            COUNT(b.id)::INT AS box_count,
+            COALESCE(SUM(b.qty_per_box), 0)::INT AS box_qty
+          FROM boxes b
+          INNER JOIN products p ON p.id = b.product_id
+          WHERE b.location_id IS NOT NULL
+            AND b.status = 'IN_RACK'
+          GROUP BY b.location_id, p.id, p.sku, p.name
+        ),
+        prod_summary_per_loc AS (
+          SELECT
+            location_id,
+            json_agg(
+              json_build_object(
+                'product_id', product_id,
+                'sku', sku,
+                'product_name', product_name,
+                'unit_qty', unit_qty,
+                'box_count', box_count,
+                'box_qty', box_qty,
+                'total_qty', (unit_qty + box_qty)
+              )
+              ORDER BY sku ASC
+            ) AS products_summary
+          FROM (
+            SELECT
+              location_id,
+              product_id,
+              sku,
+              product_name,
+              SUM(unit_qty)::INT AS unit_qty,
+              SUM(box_count)::INT AS box_count,
+              SUM(box_qty)::INT AS box_qty
+            FROM prod_combined
+            GROUP BY location_id, product_id, sku, product_name
+          ) grouped_prod
+          GROUP BY location_id
+        )
         SELECT
           l.id,
           l.code,
           l.zone_code,
           l.name,
           l.max_capacity,
-          l.current_items_count,
+          COALESCE(ia.unit_items_count, 0)::INT AS unit_items_count,
+          COALESCE(ba.box_count, 0)::INT AS box_count,
+          COALESCE(ba.box_units_count, 0)::INT AS box_units_count,
+          CASE
+            WHEN (COALESCE(ia.unit_items_count, 0) + COALESCE(ba.box_units_count, 0)) > 0
+              THEN (COALESCE(ia.unit_items_count, 0) + COALESCE(ba.box_units_count, 0))
+            ELSE COALESCE(l.current_items_count, 0)
+          END::INT AS current_items_count,
           CASE
             WHEN COALESCE(l.max_capacity, 0) <= 0 THEN 'Padat'
-            WHEN COALESCE(l.current_items_count, 0)::NUMERIC
-                 / l.max_capacity * 100 < 50 THEN 'Longgar'
-            WHEN COALESCE(l.current_items_count, 0)::NUMERIC
-                 / l.max_capacity * 100 <= 85 THEN 'Optimal'
+            WHEN (
+              CASE
+                WHEN (COALESCE(ia.unit_items_count, 0) + COALESCE(ba.box_units_count, 0)) > 0
+                  THEN (COALESCE(ia.unit_items_count, 0) + COALESCE(ba.box_units_count, 0))
+                ELSE COALESCE(l.current_items_count, 0)
+              END
+            )::NUMERIC / l.max_capacity * 100 < 50 THEN 'Longgar'
+            WHEN (
+              CASE
+                WHEN (COALESCE(ia.unit_items_count, 0) + COALESCE(ba.box_units_count, 0)) > 0
+                  THEN (COALESCE(ia.unit_items_count, 0) + COALESCE(ba.box_units_count, 0))
+                ELSE COALESCE(l.current_items_count, 0)
+              END
+            )::NUMERIC / l.max_capacity * 100 <= 85 THEN 'Optimal'
             ELSE 'Padat'
           END AS capacity_status,
-          l.location_type
+          l.location_type,
+          COALESCE(ba.boxes, '[]'::json) AS boxes,
+          COALESCE(ps.products_summary, '[]'::json) AS products_summary
         FROM locations l
+        LEFT JOIN item_agg ia ON ia.location_id = l.id
+        LEFT JOIN box_agg ba ON ba.location_id = l.id
+        LEFT JOIN prod_summary_per_loc ps ON ps.location_id = l.id
         ORDER BY l.zone_code ASC, l.code ASC
       `);
 
@@ -396,8 +514,104 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
       );
 
       if (itemResult.rows.length === 0) {
+        // Fallback: Cek apakah yang di-scan/diketik adalah Master EPC atau Kode Box (Master/Inner Box)
+        const boxResult = await client.query(
+          `
+          SELECT
+            b.*,
+            p.sku,
+            p.name AS product_name,
+            l.code AS current_loc_code,
+            l.name AS current_loc_name
+          FROM boxes b
+          INNER JOIN products p ON p.id = b.product_id
+          LEFT JOIN locations l ON l.id = b.location_id
+          WHERE UPPER(BTRIM(b.master_epc)) = UPPER($1)
+             OR UPPER(BTRIM(b.box_code)) = UPPER($1)
+          LIMIT 1
+          FOR UPDATE OF b
+          `,
+          [epc.trim()]
+        );
+
+        if (boxResult.rows.length > 0) {
+          const box = boxResult.rows[0];
+          if (box.status === 'UNPACKED' || box.status === 'SHIPPED') {
+            const error = new Error(
+              `Putaway Box ditolak. Box ${box.box_code} berstatus ${box.status}.`
+            ) as Error & { statusCode: number };
+            error.statusCode = 409;
+            throw error;
+          }
+
+          const destRes = await client.query(
+            `SELECT id, code, name, location_type FROM locations WHERE code = $1 LIMIT 1 FOR UPDATE`,
+            [location_code.trim().toUpperCase()]
+          );
+          const destRack = destRes.rows[0];
+          if (!destRack) {
+            const error = new Error('Lokasi rak tujuan tidak ditemukan.') as Error & { statusCode: number };
+            error.statusCode = 404;
+            throw error;
+          }
+          if (destRack.location_type !== 'RACK') {
+            const error = new Error('Lokasi tujuan bukan rak penyimpanan (RACK).') as Error & { statusCode: number };
+            error.statusCode = 400;
+            throw error;
+          }
+
+          await client.query(
+            `UPDATE boxes SET location_id = $1, status = 'IN_RACK' WHERE id = $2`,
+            [destRack.id, box.id]
+          );
+
+          await client.query(
+            `INSERT INTO stock_movements (
+              id, tx_code, movement_type, product_id, sku, from_location, to_location,
+              qty_change, qty_label, reference_doc, performed_by_name, from_location_id, to_location_id, created_at
+            ) VALUES ($1, $2, 'PUTAWAY', $3, $4, $5, $6, 0, $7, $8, 'Operator Gudang', $9, $10, NOW())`,
+            [
+              randomUUID(),
+              `BOX-PUT-${Date.now().toString().slice(-6)}`,
+              box.product_id,
+              box.sku,
+              box.current_loc_code ? `${box.current_loc_code} - ${box.current_loc_name}` : 'Staging Inbound (INB01)',
+              `${destRack.code} - ${destRack.name}`,
+              `${box.qty_per_box} unit (1 Box ditempatkan di rak)`,
+              box.box_code,
+              box.location_id || null,
+              destRack.id,
+            ]
+          );
+
+          await client.query('COMMIT');
+          transactionStarted = false;
+
+          publishRealtimeEvent('wms/stock/realtime', {
+            event: 'BOX_PUTAWAY_COMPLETED',
+            box_code: box.box_code,
+            epc: box.master_epc,
+            sku: box.sku,
+            to_location: destRack.code,
+          });
+
+          return reply.code(201).send({
+            success: true,
+            message: `Box ${box.box_code} (${box.qty_per_box} unit ${box.product_name}) berhasil ditempatkan di rak ${destRack.code}.`,
+            data: {
+              epc: box.master_epc,
+              box_code: box.box_code,
+              sku: box.sku,
+              product_name: box.product_name,
+              to_location: destRack.code,
+              item_status: 'IN_RACK',
+              tag_status: 'IN_RACK',
+            },
+          });
+        }
+
         const error = new Error(
-          'RFID tidak ditemukan atau belum terhubung dengan item dan produk.'
+          'RFID atau Kode Box tidak ditemukan atau belum terhubung dengan item dan produk.'
         ) as Error & { statusCode: number };
         error.statusCode = 404;
         throw error;
