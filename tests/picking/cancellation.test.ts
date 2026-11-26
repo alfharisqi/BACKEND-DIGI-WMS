@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { after, before, test } from 'node:test';
+import { after, before, test, type TestContext } from 'node:test';
 import Fastify from 'fastify';
 import jwt from 'jsonwebtoken';
 import type { Pool } from 'pg';
 import { PackingRepository } from '../../src/modules/orang1-picking/packing';
 import { PickingRepository } from '../../src/modules/orang1-picking/repository';
 import { orang1PickingRoutes } from '../../src/modules/orang1-picking/routes';
+import { db } from '../../src/config/db';
 
 const orderId = randomUUID();
 const nextOrderId = randomUUID();
@@ -44,7 +45,7 @@ type Options = {
   beforeAudit?: () => Promise<void>;
 };
 
-async function fixture(options: Options = {}) {
+async function fixture(options: Options = {}, runtimeMock?: TestContext['mock']) {
   let status = options.status ?? 'MENUNGGU_PICKING';
   let audit: Record<string, unknown> | undefined;
   let tail = Promise.resolve();
@@ -179,10 +180,16 @@ async function fixture(options: Options = {}) {
   } as unknown as Pool;
 
   const api = Fastify();
-  await api.register(orang1PickingRoutes, {
-    repository: new PickingRepository(pool, { cancellationApproved: options.approval }),
-    packing: new PackingRepository(pool),
-  });
+  if (runtimeMock) {
+    runtimeMock.method(db, 'query', pool.query);
+    runtimeMock.method(db, 'connect', pool.connect);
+    await api.register(orang1PickingRoutes);
+  } else {
+    await api.register(orang1PickingRoutes, {
+      repository: new PickingRepository(pool, { cancellationApproved: options.approval }),
+      packing: new PackingRepository(pool),
+    });
+  }
   const auth = (role = 'ADMIN') => ({ authorization: `Bearer ${jwt.sign({ ...admin, role }, secret)}` });
   return {
     api, auth, writes, statements,
@@ -380,8 +387,8 @@ test('CXL-A20: neither Packing mutation can run after cancellation', async t => 
   assert.deepEqual(f.writes, []);
 });
 
-test('CXL-A21: missing approval or migration disables the action while normal lists still load', async t => {
-  for (const options of [{}, { approval: true, schema: false }]) {
+test('CXL-A21: the emergency switch or missing migration disables cancellation while normal lists still load', async t => {
+  for (const options of [{ approval: false }, { schema: false }]) {
     const f = await fixture(options);
     t.after(() => f.api.close());
     assert.equal((await f.list()).json().data[0].can_cancel, false);
@@ -389,5 +396,25 @@ test('CXL-A21: missing approval or migration disables the action while normal li
     assert.equal((await f.cancel()).statusCode, 503);
     assert.equal(f.lockAttempts, 0);
     assert.deepEqual(f.writes, []);
+  }
+});
+
+test('runtime startup enables cancellation by default and honors the emergency override', async t => {
+  const env = 'DIGI_WMS_PICKING_CANCELLATION_APPROVED';
+  const previous = process.env[env];
+  try {
+    for (const value of [undefined, 'true', 'false', undefined]) {
+      await t.test(`register routes with ${value ?? 'no override'}`, async current => {
+        if (value === undefined) delete process.env[env];
+        else process.env[env] = value;
+        const f = await fixture({}, current.mock);
+        current.after(() => f.api.close());
+        assert.equal((await f.list()).json().data[0].can_cancel, value !== 'false');
+        assert.equal((await f.cancel()).statusCode, value === 'false' ? 503 : 200);
+      });
+    }
+  } finally {
+    if (previous === undefined) delete process.env[env];
+    else process.env[env] = previous;
   }
 });

@@ -232,7 +232,7 @@ export async function verifyPickingAccount(db: Database, session: WarehouseSessi
 }
 
 export class PickingRepository {
-  // Cancellation requires an explicit runtime opt-in and the verified schema.
+  // The emergency switch and schema checks also apply when calling the repository directly.
   constructor(
     private readonly pool: Pool,
     private readonly options: { cancellationApproved?: boolean } = {},
@@ -243,7 +243,7 @@ export class PickingRepository {
     const orders = await selectOrders(this.pool, status, null);
     const candidates = orders.filter(order => ['MENUNGGU_PICKING', 'SEDANG_DIAMBIL'].includes(order.status)).map(order => order.id);
     const eligible = new Set<string>();
-    if (candidates.length && session.role === pickingCancellationRole && this.options.cancellationApproved
+    if (candidates.length && session.role === pickingCancellationRole && this.options.cancellationApproved !== false
       && await cancellationSchemaReady(this.pool)) {
       const { rows } = await this.pool.query<{ id: string }>(cancellableOrders, [candidates]);
       rows.forEach(row => eligible.add(row.id));
@@ -253,7 +253,7 @@ export class PickingRepository {
 
   async cancel(orderId: string, input: ReturnType<typeof cancellationInput>, session: WarehouseSession) {
     if (session.role !== pickingCancellationRole) throw new PickingError(403, 'Akun ini tidak berwenang membatalkan pesanan picking.');
-    if (!this.options.cancellationApproved) throw new PickingError(503, 'Pembatalan pesanan picking belum diaktifkan.');
+    if (this.options.cancellationApproved === false) throw new PickingError(503, 'Pembatalan pesanan picking belum diaktifkan.');
 
     const client = await this.pool.connect();
     try {

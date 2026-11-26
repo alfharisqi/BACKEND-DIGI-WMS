@@ -42,31 +42,37 @@ Rilis ini mengintegrasikan branch `feature/orang1-mvp2-picking-enhancement` ke `
 
 | Pemeriksaan | Hasil |
 | --- | --- |
-| Backend | Build dan `tsc --noEmit` lulus. 38 automated test lulus, termasuk Picking, Packing, rollback, konkurensi mock, otorisasi, Pengiriman, POS, Box, dan Gate Pass. |
+| Backend | Build dan `tsc --noEmit` lulus. 43 automated test lulus, termasuk default dan override pembatalan, Picking, Packing, rollback, konkurensi mock, otorisasi, Pengiriman, POS, Box, dan Gate Pass. |
 | Frontend | Build lulus dengan peringatan chunk Vite di atas 500 kB. 18 automated test lulus, termasuk skenario Chrome dengan API mock. |
 | Manual | Pengguna mengonfirmasi 32 dari 32 checklist lulus di localhost dengan Supabase tim. Cakupannya termasuk kedua skenario pembatalan, perubahan status RFID, penggunaan ulang EPC, ledger, audit, ADMIN, Picking dan Packing normal, serta Pengiriman, POS, dan Gate Pass. |
 
 Regresi final menggunakan fixture atau mock. Runner PostgreSQL yang membutuhkan database lokal tidak dijalankan. Tidak ada transaksi otomatis pada Supabase tim atau pengubahan data hasil uji manual.
 
-## Jalankan aplikasi dan aktifkan pembatalan
+## Jalankan aplikasi
 
 Gunakan `.env` dan autentikasi existing. Jika broker belum berjalan, jalankan `docker compose up -d emqx` dari backend. Backend dijalankan dengan `npm.cmd run dev` pada port 5000 dan frontend memakai `npm.cmd run dev` pada port 3000 dari terminal lain. Cek [health backend](http://localhost:5000/api/health) untuk status Supabase dan EMQX, lalu buka [DIGI WMS](http://localhost:3000/).
 
-Sakelar pembatalan default nonaktif. Untuk mengaktifkannya pada proses backend memakai PowerShell, jalankan berikut dari folder backend.
+Pembatalan aktif secara default saat backend dijalankan. Nilai `true` juga mengaktifkannya. Tombol **Batalkan Pesanan** tersedia untuk ADMIN aktif pada order yang memenuhi syarat dan siap secara skema. Untuk menghentikan pembatalan baru dalam kondisi darurat, jalankan backend dengan override berikut di lingkungan prosesnya.
 
 ```powershell
-$env:DIGI_WMS_PICKING_CANCELLATION_APPROVED = 'true'
+$env:DIGI_WMS_PICKING_CANCELLATION_APPROVED = 'false'
 npm.cmd run dev
 ```
 
-Untuk aktivasi permanen, tetapkan nilai yang sama pada lingkungan proses backend yang sudah diperbarui dan restart setelah seluruh instance penulis memakai versi kompatibel. Backend juga memeriksa kesiapan skema dan akun ADMIN aktif. Untuk menahan pembatalan baru, hapus variabel dari lingkungan peluncur kemudian restart backend kompatibel. Pertahankan skema, audit, dan order historis.
+Hapus override `false` dari lingkungan peluncur dan restart untuk kembali ke default. `.env` existing dapat tetap digunakan. Riwayat pembatalan tetap dapat dibaca ketika pembatalan baru dinonaktifkan.
+
+### Backend lama dan EPC yang dilepas
+
+Pembatalan memakai skema SQL 006 yang sudah terpasang. SQL 007 ditahan sebagai proposal di luar direktori migrasi. Backend dapat berjalan tanpa SQL 007 atau penanda transaksi yang diusulkan di dalamnya. [Proposal SQL 007](sql/proposals/007_orang1_released_epc_outbound_guard.sql)
+
+SQL 006 melindungi status akhir order dan reservasi yang masih aktif. Setelah EPC dikembalikan ke `IN_STOCK`, jalur Pengiriman dan Gate Pass pada backend lama masih dapat mengotorisasi EPC berdasarkan statusnya tanpa memeriksa kepemilikan sumber yang valid. Perbarui setiap instance backend lama sebelum digunakan kembali.
 
 ## Pembaruan repository anggota tim
 
 1. Setelah rilis tersedia pada `origin/main` di backend dan frontend, hentikan kedua proses lama. Jalankan `git status --short` di kedua repo dan amankan perubahan lokal sebelum pindah branch.
 2. Di tiap repo, jalankan `git fetch origin`, `git switch main`, dan `git pull --ff-only origin main`. Jika tidak bisa fast-forward, koordinasikan integrasi sebelum mencoba lagi.
 3. Perbarui **kedua** repository sebelum layanan dipakai kembali. Jalankan `npm.cmd ci` bila dependensi perlu dipasang ulang. Pertahankan `.env` existing. Jalankan hanya backend kompatibel, mulai ulang frontend, dan muat ulang halaman untuk mengambil payload Pengiriman terbaru.
-4. Setelah semua instance lama diganti, aktifkan pembatalan secara permanen. Backend lama harus tetap berhenti. Jalur Pengiriman dan Gate Pass lama dapat mengotorisasi EPC yang sudah dilepas ke `IN_STOCK` tanpa memeriksa order sumber, meskipun sakelar pembatalan dimatikan.
+4. Jalankan backend terbaru tanpa override untuk memakai pembatalan secara default. Biarkan backend lama berhenti. Menonaktifkan pembatalan baru melalui override tidak mengubah status EPC yang sudah dilepas.
 
 Fetch final menegaskan kedua branch sudah memuat `origin/main` pada backend `6169742` dan frontend `c77d19e`. Tidak ada commit tim baru untuk diintegrasikan.
 

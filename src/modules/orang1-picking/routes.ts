@@ -33,7 +33,7 @@ interface PickingOptions {
 
 export async function orang1PickingRoutes(app: FastifyInstance, options: PickingOptions = {}) {
   const repository = options.repository ?? new PickingRepository(db, {
-    cancellationApproved: process.env.DIGI_WMS_PICKING_CANCELLATION_APPROVED === 'true',
+    cancellationApproved: process.env.DIGI_WMS_PICKING_CANCELLATION_APPROVED?.trim().toLowerCase() !== 'false',
   });
   const packing = options.packing ?? new PackingRepository(db);
   app.get('/api/picking/orders', async (request, reply) => {
