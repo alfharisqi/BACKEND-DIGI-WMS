@@ -296,6 +296,218 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
   });
 
   // ==========================================================================
+  // 2B. PUT EDIT RAK & DELETE HAPUS RAK KOSONG
+  // ==========================================================================
+  app.put('/api/locations/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const {
+      code,
+      zone_code,
+      name,
+      max_capacity,
+    } = (request.body ?? {}) as {
+      code?: string;
+      zone_code?: string;
+      name?: string;
+      max_capacity?: number;
+    };
+
+    if (
+      typeof code !== 'string' ||
+      !code.trim() ||
+      typeof zone_code !== 'string' ||
+      !zone_code.trim() ||
+      typeof name !== 'string' ||
+      !name.trim() ||
+      !Number.isInteger(Number(max_capacity)) ||
+      Number(max_capacity) <= 0
+    ) {
+      return reply.code(400).send({
+        success: false,
+        message: 'Kode rak, zona, nama rak, dan kapasitas maksimum (> 0) wajib diisi.',
+      });
+    }
+
+    if (!isPostgresConnected) {
+      return reply.code(503).send({
+        success: false,
+        message: 'Database PostgreSQL belum terhubung.',
+      });
+    }
+
+    try {
+      const occRes = await db.query(
+        `SELECT
+           l.id,
+           l.code,
+           l.location_type,
+           COALESCE((SELECT COUNT(*)::int FROM items i WHERE i.location_id = l.id AND i.status IN ('IN_STOCK', 'RESERVED', 'AUTHORIZED_OUT')), 0)
+           + COALESCE((SELECT SUM(b.qty_per_box)::int FROM boxes b WHERE b.location_id = l.id AND b.status = 'IN_RACK'), 0) AS occupied
+         FROM locations l
+         WHERE l.id::text = $1 OR l.code = $1
+         LIMIT 1`,
+        [id.trim()]
+      );
+
+      if (occRes.rows.length === 0) {
+        return reply.code(404).send({
+          success: false,
+          message: 'Rak tidak ditemukan.',
+        });
+      }
+
+      const loc = occRes.rows[0];
+      if (loc.location_type !== 'RACK') {
+        return reply.code(400).send({
+          success: false,
+          message: 'Hanya lokasi bertipe RACK yang dapat diubah.',
+        });
+      }
+
+      const occupied = Number(loc.occupied || 0);
+      const nextCapacity = Number(max_capacity);
+      if (nextCapacity < occupied) {
+        return reply.code(409).send({
+          success: false,
+          message: `Kapasitas baru (${nextCapacity}) tidak boleh lebih kecil dari jumlah barang di rak saat ini (${occupied} unit).`,
+        });
+      }
+
+      const pct = (occupied / nextCapacity) * 100;
+      const capStatus = pct < 50 ? 'Longgar' : pct <= 85 ? 'Optimal' : 'Padat';
+
+      const updRes = await db.query(
+        `UPDATE locations
+         SET code = $1,
+             zone_code = $2,
+             name = $3,
+             max_capacity = $4,
+             current_items_count = $5,
+             capacity_status = $6
+         WHERE id = $7
+         RETURNING *`,
+        [
+          code.trim().toUpperCase(),
+          zone_code.trim().toUpperCase(),
+          name.trim(),
+          nextCapacity,
+          occupied,
+          capStatus,
+          loc.id,
+        ]
+      );
+
+      return reply.send({
+        success: true,
+        message: `Rak ${updRes.rows[0].code} berhasil diperbarui.`,
+        data: updRes.rows[0],
+      });
+    } catch (error) {
+      const dbError = error as Error & { code?: string };
+      if (dbError.code === '23505') {
+        return reply.code(409).send({
+          success: false,
+          message: 'Kode rak sudah digunakan oleh rak lain.',
+        });
+      }
+      return reply.code(500).send({
+        success: false,
+        message: 'Gagal memperbarui rak.',
+        error: dbError.message,
+      });
+    }
+  });
+
+  app.delete('/api/locations/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    if (!isPostgresConnected) {
+      return reply.code(503).send({
+        success: false,
+        message: 'Database PostgreSQL belum terhubung.',
+      });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const locRes = await client.query(
+        `SELECT
+           l.id,
+           l.code,
+           l.name,
+           l.location_type,
+           COALESCE((SELECT COUNT(*)::int FROM items i WHERE i.location_id = l.id AND i.status IN ('IN_STOCK', 'RESERVED', 'AUTHORIZED_OUT')), 0) AS active_items,
+           COALESCE((SELECT COUNT(*)::int FROM boxes b WHERE b.location_id = l.id AND b.status = 'IN_RACK'), 0) AS active_boxes
+         FROM locations l
+         WHERE l.id::text = $1 OR l.code = $1
+         LIMIT 1
+         FOR UPDATE`,
+        [id.trim()]
+      );
+
+      if (locRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return reply.code(404).send({
+          success: false,
+          message: 'Rak tidak ditemukan.',
+        });
+      }
+
+      const loc = locRes.rows[0];
+      if (loc.location_type !== 'RACK') {
+        await client.query('ROLLBACK');
+        return reply.code(400).send({
+          success: false,
+          message: 'Lokasi sistem/transit tidak dapat dihapus.',
+        });
+      }
+
+      if (Number(loc.active_items) > 0 || Number(loc.active_boxes) > 0) {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({
+          success: false,
+          message: `Rak ${loc.code} masih berisi ${loc.active_boxes} Box dan ${loc.active_items} Tag aktif. Pindahkan seluruh isi rak terlebih dahulu sebelum menghapus.`,
+        });
+      }
+
+      // Lepaskan referensi historis pada item/box non-aktif agar tidak melanggar FK
+      await client.query(`UPDATE items SET location_id = NULL WHERE location_id = $1`, [loc.id]);
+      await client.query(`UPDATE boxes SET location_id = NULL WHERE location_id = $1`, [loc.id]);
+      await client.query(`UPDATE outbound_picking_items SET location_id = NULL WHERE location_id = $1`, [loc.id]).catch(() => {});
+      await client.query(`ALTER TABLE stock_movements DISABLE TRIGGER USER`).catch(() => {});
+      await client.query(`UPDATE stock_movements SET from_location_id = NULL WHERE from_location_id = $1`, [loc.id]).catch(() => {});
+      await client.query(`UPDATE stock_movements SET to_location_id = NULL WHERE to_location_id = $1`, [loc.id]).catch(() => {});
+      await client.query(`ALTER TABLE stock_movements ENABLE TRIGGER USER`).catch(() => {});
+
+      await client.query(`DELETE FROM locations WHERE id = $1`, [loc.id]);
+      await client.query('COMMIT');
+
+      return reply.send({
+        success: true,
+        message: `Rak ${loc.code} (${loc.name}) berhasil dihapus.`,
+      });
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      const dbError = error as Error & { code?: string };
+      if (dbError.code === '23503') {
+        return reply.code(409).send({
+          success: false,
+          message: 'Rak tidak dapat dihapus karena masih dirujuk oleh histori transaksi.',
+        });
+      }
+      return reply.code(500).send({
+        success: false,
+        message: 'Gagal menghapus rak.',
+        error: dbError.message,
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ==========================================================================
   // 3. GET RINGKASAN STOK BARANG
   // Menghitung stok berdasarkan agregasi stock_movements.
   // Tidak mengubah products.current_stock.
@@ -619,17 +831,19 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
 
       const item = itemResult.rows[0];
 
-      // 2. Putaway hanya menerima item dan tag berstatus ENCODED.
-      if (item.tag_status !== 'ENCODED' || item.item_status !== 'ENCODED') {
+      // 2. Putaway menerima item ENCODED (penempatan awal) maupun IN_STOCK (pindah antar-rak yang berbeda).
+      const isEncodedPutaway = item.tag_status === 'ENCODED' && item.item_status === 'ENCODED';
+      const isRackTransfer = item.tag_status === 'IN_STOCK' && item.item_status === 'IN_STOCK';
+
+      if (!isEncodedPutaway && !isRackTransfer) {
         const error = new Error(
-          `Putaway ditolak. Status tag: ${item.tag_status}; status item: ${item.item_status}. Keduanya harus ENCODED.`
+          `Putaway ditolak. Status tag: ${item.tag_status}; status item: ${item.item_status}. Keduanya harus ENCODED atau IN_STOCK.`
         ) as Error & { statusCode: number };
         error.statusCode = 409;
         throw error;
       }
 
-      // 3. Kunci lokasi transit INB01 dan lokasi rak tujuan.
-      // Penguncian berdasarkan ID menjaga urutan lock tetap konsisten.
+      // 3. Kunci lokasi transit INB01, lokasi asal (jika transfer rak), dan lokasi rak tujuan.
       const locationsResult = await client.query(
         `
         SELECT
@@ -643,14 +857,18 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           location_type
         FROM locations
         WHERE code IN ('INB01', $1)
+           OR ($2::uuid IS NOT NULL AND id = $2::uuid)
         ORDER BY id
         FOR UPDATE
         `,
-        [location_code.trim().toUpperCase()]
+        [location_code.trim().toUpperCase(), item.location_id || null]
       );
 
       const sourceLocation = locationsResult.rows.find(
         (location: { code: string }) => location.code === 'INB01'
+      );
+      const currentItemRack = locationsResult.rows.find(
+        (location: { id: string }) => location.id === item.location_id
       );
       const destinationLocation = locationsResult.rows.find(
         (location: { code: string }) =>
@@ -693,13 +911,22 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 4. Terima item yang sudah berada di INB01 maupun item baru hasil encoding meja Orang 1 (location_id === null).
+      if (isRackTransfer && item.location_id === destinationLocation.id) {
+        const error = new Error(
+          `Putaway ditolak. Barang sudah berada di rak ${destinationLocation.code}.`
+        ) as Error & { statusCode: number };
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // 4. Terima item dari INB01, Meja Tagging (location_id === null), atau Rak Asal (saat pindah rak).
       const isFromTransit = item.location_id === sourceLocation.id;
       const isFromEncodingDesk = item.location_id === null;
+      const isFromAnotherRack = isRackTransfer && currentItemRack && currentItemRack.location_type === 'RACK';
 
-      if (!isFromTransit && !isFromEncodingDesk) {
+      if (!isFromTransit && !isFromEncodingDesk && !isFromAnotherRack) {
         const error = new Error(
-          'Lokasi asal item bukan INB01 atau Meja Tagging. Putaway hanya menerima item ENCODED baru atau dari lokasi transit INB01.'
+          'Lokasi asal item bukan INB01, Meja Tagging, atau Rak Penyimpanan.'
         ) as Error & { statusCode: number };
         error.statusCode = 409;
         throw error;
@@ -726,7 +953,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 6. Pindahkan item dari INB01 / Meja Tagging ke rak tujuan.
+      // 6. Pindahkan item ke rak tujuan.
       const updateItemResult = await client.query(
         `
         UPDATE items
@@ -736,11 +963,10 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           putaway_at = NOW(),
           updated_at = NOW()
         WHERE id = $2
-          AND (location_id = $3 OR location_id IS NULL)
-          AND status = 'ENCODED'
+          AND status = ANY($3::text[])
         RETURNING *
         `,
-        [destinationLocation.id, item.item_id, sourceLocation.id]
+        [destinationLocation.id, item.item_id, ['ENCODED', 'IN_STOCK']]
       );
 
       if (updateItemResult.rows.length === 0) {
@@ -751,7 +977,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      // 7. Ubah status tag RFID menjadi IN_STOCK.
+      // 7. Pastikan status tag RFID adalah IN_STOCK.
       const updateTagResult = await client.query(
         `
         UPDATE tags
@@ -759,10 +985,10 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           status = 'IN_STOCK',
           updated_at = NOW()
         WHERE id = $1
-          AND status = 'ENCODED'
+          AND status = ANY($2::text[])
         RETURNING id
         `,
-        [item.tag_id]
+        [item.tag_id, ['ENCODED', 'IN_STOCK']]
       );
 
       if (updateTagResult.rows.length === 0) {
@@ -863,7 +1089,7 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
         ledgerOutRow = ledgerOutResult.rows[0];
       }
 
-      // 12. Catat penerimaan item pada rak tujuan (+1).
+      // 12. Catat penerimaan item pada rak tujuan (+1 untuk putaway awal, 0 untuk pindah antar-rak).
       const ledgerInResult = await client.query(
         `
         INSERT INTO stock_movements (
@@ -889,12 +1115,12 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           $4,
           $5,
           $6,
-          1,
-          '+1 unit',
           $7,
-          'System',
           $8,
-          $9
+          $9,
+          'System',
+          $10,
+          $11
         )
         RETURNING *
         `,
@@ -903,10 +1129,20 @@ export async function orang2InventoryRoutes(app: FastifyInstance) {
           item.product_id,
           item.sku,
           item.tag_id,
-          isFromTransit ? 'Proses Putaway' : sourceLocation.name,
+          isFromAnotherRack
+            ? `${currentItemRack.code} - ${currentItemRack.name}`
+            : isFromTransit
+            ? 'Proses Putaway'
+            : sourceLocation.name,
           destinationLocation.name,
+          isFromAnotherRack ? 0 : 1,
+          isFromAnotherRack ? '1 unit (Pindah Antar-Rak)' : '+1 unit',
           reference_doc.trim(),
-          isFromTransit ? null : sourceLocation.id,
+          isFromAnotherRack
+            ? currentItemRack.id
+            : isFromTransit
+            ? null
+            : sourceLocation.id,
           destinationLocation.id,
         ]
       );

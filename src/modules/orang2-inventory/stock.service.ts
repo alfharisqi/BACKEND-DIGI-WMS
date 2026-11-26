@@ -30,7 +30,40 @@ export async function getAggregatedStockByProduct() {
       p.category,
       p.min_stock_threshold,
       COALESCE(la.current_stock, 0)::INT AS current_stock,
-      COALESCE(la.total_transactions, 0)::INT AS total_transactions
+      COALESCE(la.total_transactions, 0)::INT AS total_transactions,
+      (
+        COALESCE((
+          SELECT COUNT(i.id)::INT
+          FROM items i
+          INNER JOIN locations l ON l.id = i.location_id
+          WHERE i.product_id = p.id AND l.location_type = 'RACK' AND i.status = 'IN_STOCK'
+        ), 0)
+        +
+        COALESCE((
+          SELECT SUM(b.qty_per_box)::INT
+          FROM boxes b
+          INNER JOIN locations l ON l.id = b.location_id
+          WHERE b.product_id = p.id AND l.location_type = 'RACK' AND b.status = 'IN_RACK'
+        ), 0)
+      )::INT AS in_rack_stock,
+      (
+        COALESCE((
+          SELECT COUNT(i.id)::INT
+          FROM items i
+          WHERE i.product_id = p.id AND i.status = 'ENCODED'
+        ), 0)
+        +
+        COALESCE((
+          SELECT SUM(b.qty_per_box)::INT
+          FROM boxes b
+          WHERE b.product_id = p.id AND b.status = 'SEALED'
+        ), 0)
+      )::INT AS staging_stock,
+      COALESCE((
+        SELECT COUNT(i.id)::INT
+        FROM items i
+        WHERE i.product_id = p.id AND i.status IN ('RESERVED', 'AUTHORIZED_OUT')
+      ), 0)::INT AS reserved_stock
     FROM products p
     LEFT JOIN ledger_aggregate la
       ON la.product_id = p.id
@@ -44,6 +77,9 @@ export async function getAggregatedStockByProduct() {
     return {
       ...row,
       current_stock: currentStock,
+      in_rack_stock: Number(row.in_rack_stock ?? 0),
+      staging_stock: Number(row.staging_stock ?? 0),
+      reserved_stock: Number(row.reserved_stock ?? 0),
       total_transactions: Number(row.total_transactions),
       stock_status:
         currentStock <= minStock ? 'STOK_RENDAH' : 'AMAN',
