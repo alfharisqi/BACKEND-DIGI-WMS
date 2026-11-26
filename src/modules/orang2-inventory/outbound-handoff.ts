@@ -171,7 +171,19 @@ export async function validateShipmentItems(client: PoolClient, source: Shipment
             && (item.tag_status === 'IN_STOCK' || (item.tag_status === 'AUTHORIZED_OUT' && state.preauthorized));
       }
     }
-    if (!valid) throw new HandoffError(409, `EPC ${item.epc} tidak tersedia untuk sumber Pengiriman yang dipilih.`);
+    if (!valid) {
+      let detail = '';
+      if (item.tag_status === 'ENCODED' || !item.location_type) {
+        detail = ' (masih berstatus ENCODED / belum dilakukan Putaway ke Rak Penyimpanan)';
+      } else if (source.type === 'STOK_BEBAS' && (state?.picking_owner || state?.outbound_owner || item.tag_status === 'RESERVED')) {
+        detail = ` (status ${item.tag_status} — sedang terikat pada Order Picking, pilih Order Picking terkait pada Sumber Pengiriman)`;
+      } else if (item.tag_status === 'EXITED') {
+        detail = ' (barang sudah keluar gerbang / EXITED)';
+      } else if (state?.already_handed_off || state?.latest_movement === 'OUTBOUND_SHIPMENT') {
+        detail = ' (sudah diterbitkan dalam pengiriman Outbound sebelumnya)';
+      }
+      throw new HandoffError(409, `EPC ${item.epc} tidak tersedia untuk sumber Pengiriman yang dipilih${detail}.`);
+    }
   }
 
   if ('order_id' in source) {

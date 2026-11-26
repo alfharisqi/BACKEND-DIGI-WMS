@@ -870,16 +870,21 @@ export async function outboundRoutes(app: FastifyInstance) {
         INNER JOIN items i ON i.tag_id = t.id
         INNER JOIN products p ON p.id = i.product_id
         LEFT JOIN locations l ON l.id = i.location_id
-        WHERE t.epc = ANY($1::text[])
-          AND (NOT $2::boolean OR (t.status = i.status AND t.status IN ('IN_STOCK', 'AUTHORIZED_OUT')))
+        WHERE UPPER(BTRIM(t.epc)) = ANY($1::text[])
         ORDER BY t.epc
         FOR UPDATE OF t, i
         `,
-        [normalizedEpcs, source.type === 'STOK_BEBAS']
+        [normalizedEpcs.map((e) => e.toUpperCase())]
       );
 
       if (result.rows.length !== normalizedEpcs.length) {
-        const error = new Error('Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.') as Error & { statusCode: number };
+        const foundSet = new Set(result.rows.map((r: any) => String(r.epc || '').trim().toUpperCase()));
+        const missing = normalizedEpcs.filter((e) => !foundSet.has(e.toUpperCase()));
+        const error = new Error(
+          missing.length > 0
+            ? `Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk: ${missing.join(', ')}`
+            : 'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
+        ) as Error & { statusCode: number };
         error.statusCode = 404;
         throw error;
       }
@@ -1078,17 +1083,20 @@ export async function outboundRoutes(app: FastifyInstance) {
         INNER JOIN items i ON i.tag_id = t.id
         INNER JOIN products p ON p.id = i.product_id
         LEFT JOIN locations l ON l.id = i.location_id
-        WHERE t.epc = ANY($1::text[])
-          AND (NOT $2::boolean OR (t.status = i.status AND t.status IN ('IN_STOCK', 'AUTHORIZED_OUT')))
+        WHERE UPPER(BTRIM(t.epc)) = ANY($1::text[])
         ORDER BY t.epc
         FOR UPDATE OF t, i
         `,
-        [normalizedEpcs, source.type === 'STOK_BEBAS']
+        [normalizedEpcs.map((e) => e.toUpperCase())]
       );
 
       if (itemResult.rows.length !== normalizedEpcs.length) {
+        const foundSet = new Set(itemResult.rows.map((r: any) => String(r.epc || '').trim().toUpperCase()));
+        const missing = normalizedEpcs.filter((e) => !foundSet.has(e.toUpperCase()));
         const error = new Error(
-          'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
+          missing.length > 0
+            ? `Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk: ${missing.join(', ')}`
+            : 'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
         ) as Error & { statusCode: number };
 
         error.statusCode = 404;
