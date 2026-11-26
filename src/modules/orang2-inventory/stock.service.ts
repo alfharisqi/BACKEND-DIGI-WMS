@@ -72,17 +72,22 @@ export async function getAggregatedStockByProduct() {
 
   return result.rows.map((row) => {
     const currentStock = Number(row.current_stock);
+    const inRackStock = Number(row.in_rack_stock ?? 0);
+    const stagingStock = Number(row.staging_stock ?? 0);
+    const reservedStock = Number(row.reserved_stock ?? 0);
+    const physicalStock = inRackStock + stagingStock + reservedStock;
     const minStock = Number(row.min_stock_threshold ?? 0);
 
     return {
       ...row,
       current_stock: currentStock,
-      in_rack_stock: Number(row.in_rack_stock ?? 0),
-      staging_stock: Number(row.staging_stock ?? 0),
-      reserved_stock: Number(row.reserved_stock ?? 0),
+      in_rack_stock: inRackStock,
+      staging_stock: stagingStock,
+      reserved_stock: reservedStock,
+      physical_stock: physicalStock,
       total_transactions: Number(row.total_transactions),
       stock_status:
-        currentStock <= minStock ? 'STOK_RENDAH' : 'AMAN',
+        inRackStock <= minStock ? 'STOK_RENDAH' : 'AMAN',
     };
   });
 }

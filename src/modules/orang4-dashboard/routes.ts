@@ -7,6 +7,7 @@ import { generateToken, authenticate, requireRoles } from '../../middleware/auth
 import { registerBoxRoutes } from './boxes.routes';
 import { GateAuthorizationError, lockGateAuthorization, recordGateAuthorization } from '../gate-authorization';
 import { uuidPattern } from '../orang1-picking/contract';
+import { getAggregatedStockByProduct } from '../orang2-inventory/stock.service';
 
 /**
  * ============================================================================
@@ -47,21 +48,30 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
   // 2. GET Metrik KPI Dashboard Utama + Grafik Pergerakan + Distribusi Kategori
   app.get('/api/dashboard/summary', async () => {
     let total_stock = 0;
+    let total_in_rack = 0;
+    let total_staging = 0;
+    let total_reserved = 0;
+    let total_ledger_stock = 0;
     let total_inbound = 0;
     let active_rfid_tags = 0;
     let active_gate_passes = 0;
     let gate_alarms_count = 0;
     let total_zones = memoryStore.locations.length;
     let low_stock_items: Array<Record<string, unknown>> = [];
-    let all_stocks: Array<{ category: string; current_stock: number }> = [];
+    let all_stocks: Array<{ category: string; current_stock: number; in_rack_stock?: number }> = [];
 
     let days7: Array<{ label: string; inbound: number; outbound: number; opname: number }> = [];
     let days30: Array<{ label: string; inbound: number; outbound: number; opname: number }> = [];
 
     if (isPostgresConnected) {
-      const stockRes = await db.query('SELECT * FROM v_product_stock_ledger');
-      all_stocks = stockRes.rows;
-      total_stock = all_stocks.reduce((acc, s) => acc + Number(s.current_stock), 0);
+      const stockRows = await getAggregatedStockByProduct();
+      all_stocks = stockRows;
+      total_in_rack = stockRows.reduce((acc, s) => acc + Number(s.in_rack_stock ?? 0), 0);
+      total_staging = stockRows.reduce((acc, s) => acc + Number(s.staging_stock ?? 0), 0);
+      total_reserved = stockRows.reduce((acc, s) => acc + Number(s.reserved_stock ?? 0), 0);
+      total_ledger_stock = stockRows.reduce((acc, s) => acc + Number(s.current_stock ?? 0), 0);
+      // Gunakan stok fisik siap di rak sebagai angka utama agar konsisten dengan Stok per Rak & Stok Barang
+      total_stock = total_in_rack;
 
       const grnRes = await db.query(
         'SELECT COALESCE(SUM(total_qty), 0)::INT AS total_inbound FROM goods_receipts'
@@ -84,7 +94,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       const locRes = await db.query('SELECT COUNT(*)::INT AS total_loc FROM locations');
       total_zones = locRes.rows[0]?.total_loc || total_zones;
 
-      low_stock_items = stockRes.rows.filter((s) => s.stock_status === 'STOK_RENDAH');
+      low_stock_items = stockRows.filter((s) => s.stock_status === 'STOK_RENDAH');
 
       // Agregasi Tren 7 Hari Terakhir langsung dari tabel stock_movements
       const d7Res = await db.query(`
@@ -166,7 +176,8 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
     const categoryMap: Record<string, number> = {};
     all_stocks.forEach((item) => {
-      categoryMap[item.category] = (categoryMap[item.category] || 0) + Number(item.current_stock);
+      const qty = Number(item.in_rack_stock ?? item.current_stock ?? 0);
+      categoryMap[item.category] = (categoryMap[item.category] || 0) + qty;
     });
     const category_distribution = Object.entries(categoryMap).map(([category, stock]) => ({
       category,
@@ -177,6 +188,10 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       kpis: {
         totalSkus: all_stocks.length,
         totalPhysicalStock: total_stock,
+        totalInRackStock: total_in_rack,
+        totalStagingStock: total_staging,
+        totalReservedStock: total_reserved,
+        totalLedgerStock: total_ledger_stock,
         activeRfidTags: active_rfid_tags,
         gateAlarmsCount: gate_alarms_count,
         totalInbound: total_inbound,
