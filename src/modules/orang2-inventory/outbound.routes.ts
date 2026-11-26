@@ -763,7 +763,7 @@ export async function outboundRoutes(app: FastifyInstance) {
           SELECT COALESCE(
             json_agg(
               json_build_object(
-                'epc', t.epc,
+                'epc', COALESCE(t.epc, sm.qty_label, '-'),
                 'sku', sm.sku,
                 'product_name', p.name,
                 'qty', ABS(sm.qty_change)
@@ -1065,6 +1065,7 @@ export async function outboundRoutes(app: FastifyInstance) {
       if (pickingReference.rowCount) throw new HandoffError(409, 'Nomor resi merujuk ke order Picking lain.');
 
       // 4. Kunci seluruh barang yang akan dikirim.
+      const upperEpcs = normalizedEpcs.map((e) => e.toUpperCase());
       const itemResult = await client.query(
         `
         SELECT
@@ -1087,15 +1088,54 @@ export async function outboundRoutes(app: FastifyInstance) {
         ORDER BY t.epc
         FOR UPDATE OF t, i
         `,
-        [normalizedEpcs.map((e) => e.toUpperCase())]
+        [upperEpcs]
       );
 
-      if (itemResult.rows.length !== normalizedEpcs.length) {
-        const foundSet = new Set(itemResult.rows.map((r: any) => String(r.epc || '').trim().toUpperCase()));
+      let boxRows: any[] = [];
+      if (itemResult.rows.length < normalizedEpcs.length && source.type === 'STOK_BEBAS') {
+        const foundTagEpcs = new Set(
+          itemResult.rows.map((r: any) => String(r.epc || '').trim().toUpperCase())
+        );
+        const remainingCodes = upperEpcs.filter((e) => !foundTagEpcs.has(e));
+        if (remainingCodes.length > 0) {
+          const boxRes = await client.query(
+            `
+            SELECT
+              b.id AS box_id,
+              b.box_code,
+              b.master_epc,
+              b.status AS box_status,
+              b.qty_per_box,
+              b.product_id,
+              b.location_id,
+              p.sku,
+              p.name AS product_name,
+              l.name AS location_name,
+              l.location_type
+            FROM public.boxes b
+            INNER JOIN public.products p ON p.id = b.product_id
+            LEFT JOIN public.locations l ON l.id = b.location_id
+            WHERE UPPER(BTRIM(b.master_epc)) = ANY($1::text[])
+               OR UPPER(BTRIM(b.box_code)) = ANY($1::text[])
+            ORDER BY b.box_code
+            FOR UPDATE OF b
+            `,
+            [remainingCodes]
+          );
+          boxRows = boxRes.rows;
+        }
+      }
+
+      if (itemResult.rows.length + boxRows.length !== normalizedEpcs.length) {
+        const foundSet = new Set([
+          ...itemResult.rows.map((r: any) => String(r.epc || '').trim().toUpperCase()),
+          ...boxRows.map((b: any) => String(b.master_epc || '').trim().toUpperCase()),
+          ...boxRows.map((b: any) => String(b.box_code || '').trim().toUpperCase()),
+        ]);
         const missing = normalizedEpcs.filter((e) => !foundSet.has(e.toUpperCase()));
         const error = new Error(
           missing.length > 0
-            ? `Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk: ${missing.join(', ')}`
+            ? `Ada EPC atau Box yang tidak ditemukan atau belum terhubung dengan item dan produk: ${missing.join(', ')}`
             : 'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
         ) as Error & { statusCode: number };
 
@@ -1103,12 +1143,27 @@ export async function outboundRoutes(app: FastifyInstance) {
         throw error;
       }
 
-      await validateShipmentItems(client, source, itemResult.rows);
+      if (itemResult.rows.length > 0) {
+        await validateShipmentItems(client, source, itemResult.rows);
+      }
+
+      for (const box of boxRows) {
+        if (box.box_status !== 'IN_RACK' || box.location_type !== 'RACK') {
+          throw new HandoffError(
+            409,
+            `Box ${box.box_code} (${box.master_epc}) berstatus ${box.box_status} dan belum berada di Rak Penyimpanan.`
+          );
+        }
+      }
+
+      const totalShipmentUnits =
+        itemResult.rows.length +
+        boxRows.reduce((sum, b) => sum + Number(b.qty_per_box || 0), 0);
 
       // 5. Kunci rak asal agar jumlah isi rak aman dari transaksi bersamaan.
       const locationIds = [
         ...new Set(
-          itemResult.rows
+          [...itemResult.rows, ...boxRows]
             .map((item: any) => item.location_id)
             .filter((id: string | null) => Boolean(id))
         ),
@@ -1147,7 +1202,7 @@ export async function outboundRoutes(app: FastifyInstance) {
           invoice,
           destination,
           courier,
-          itemResult.rows.length,
+          totalShipmentUnits,
           totalAmount,
         ]
       );
@@ -1173,8 +1228,15 @@ export async function outboundRoutes(app: FastifyInstance) {
         VALUES ($1, $2, $3, 'ACTIVE', NOW() + INTERVAL '24 hours')
         RETURNING *
         `, [gatePassNumber, posSale?.id ?? sale.id, posSale?.invoice_or_resi ?? invoice])).rows[0];
-        await recordGateAuthorization(client, gatePass.id, itemResult.rows.map(({ epc, tag_id }) => ({ epc, tag_id })),
-          posSale?.invoice_or_resi ?? invoice);
+        await recordGateAuthorization(
+          client,
+          gatePass.id,
+          [
+            ...itemResult.rows.map(({ epc, tag_id }: any) => ({ epc, tag_id })),
+            ...boxRows.map((b: any) => ({ epc: b.master_epc, box_id: b.box_id })),
+          ],
+          posSale?.invoice_or_resi ?? invoice
+        );
       }
 
       const ledgerEntries = [];
@@ -1268,6 +1330,70 @@ export async function outboundRoutes(app: FastifyInstance) {
         ledgerEntries.push(ledgerResult.rows[0]);
       }
 
+      // 7B. Proses pengiriman kemasan Box utuh (jika ada Box yang dipilih)
+      for (const box of boxRows) {
+        const updBox = await client.query(
+          `
+          UPDATE public.boxes
+          SET status = 'SHIPPED'
+          WHERE id = $1 AND status = 'IN_RACK'
+          RETURNING id
+          `,
+          [box.box_id]
+        );
+        if (updBox.rows.length === 0) {
+          throw new Error(`Status Box ${box.box_code} berubah. Transaksi dibatalkan.`);
+        }
+
+        const boxQty = Number(box.qty_per_box || 1);
+        const boxLedgerRes = await client.query(
+          `
+          INSERT INTO stock_movements (
+            tx_code,
+            movement_type,
+            product_id,
+            sku,
+            tag_id,
+            from_location,
+            to_location,
+            qty_change,
+            qty_label,
+            reference_doc,
+            performed_by_name,
+            from_location_id,
+            to_location_id
+          )
+          VALUES (
+            'OUT-BOX-' || REPLACE(gen_random_uuid()::TEXT, '-', ''),
+            'OUTBOUND_SHIPMENT',
+            $1,
+            $2,
+            NULL,
+            COALESCE($3, 'Gudang'),
+            'Outbound / Pengiriman',
+            $4,
+            $5,
+            $6,
+            'System',
+            $7,
+            NULL
+          )
+          RETURNING *
+          `,
+          [
+            box.product_id,
+            box.sku,
+            box.location_name,
+            -boxQty,
+            `${box.box_code} (${box.master_epc})`,
+            invoice,
+            box.location_id,
+          ]
+        );
+
+        ledgerEntries.push(boxLedgerRes.rows[0]);
+      }
+
       await client.query(`
         INSERT INTO public.audit_logs (action, entity_type, entity_id, payload)
         VALUES ('OUTBOUND_HANDOFF', 'outbound_shipment', $1, $2::jsonb)`, [sale.id, JSON.stringify({
@@ -1275,7 +1401,11 @@ export async function outboundRoutes(app: FastifyInstance) {
         source_id: sourceId(source),
         gate_pass_id: gatePass.id,
         tag_ids: itemResult.rows.map(item => item.tag_id),
-        items: itemResult.rows.map(item => ({ epc: item.epc, sku: item.sku, product_name: item.product_name, qty: 1 })),
+        box_ids: boxRows.map(b => b.box_id),
+        items: [
+          ...itemResult.rows.map(item => ({ epc: item.epc, sku: item.sku, product_name: item.product_name, qty: 1 })),
+          ...boxRows.map(b => ({ epc: b.master_epc, box_code: b.box_code, sku: b.sku, product_name: b.product_name, qty: Number(b.qty_per_box || 1) })),
+        ],
       })]);
 
       // 8. Kapasitas rak diperbarui otomatis oleh trigger PostgreSQL

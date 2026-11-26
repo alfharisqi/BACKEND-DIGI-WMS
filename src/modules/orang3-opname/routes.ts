@@ -90,15 +90,23 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
           });
         }
 
-        // 6. Menghitung barang yang tersedia di zona tersebut
+        // 6. Menghitung barang (Tag Satuan + Box IN_RACK) yang tersedia di zona tersebut
         const itemResult = await db.query(
-          `SELECT COUNT(*)::int AS total_expected
-           FROM items i
-           JOIN locations l ON i.location_id = l.id
-           JOIN tags t ON i.tag_id = t.id
-           WHERE l.zone_code = $1
-             AND i.status = 'IN_STOCK'
-             AND t.status = 'IN_STOCK'`,
+          `SELECT (
+             (SELECT COUNT(*)::int
+              FROM items i
+              JOIN locations l ON i.location_id = l.id
+              JOIN tags t ON i.tag_id = t.id
+              WHERE l.zone_code = $1
+                AND i.status = 'IN_STOCK'
+                AND t.status = 'IN_STOCK')
+             +
+             (SELECT COUNT(*)::int
+              FROM boxes b
+              JOIN locations l ON b.location_id = l.id
+              WHERE l.zone_code = $1
+                AND b.status = 'IN_RACK')
+           )::int AS total_expected`,
           [zone_code.trim()]
         );
 
@@ -186,16 +194,25 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
 
       try {
         const result = await db.query(`
+          WITH zone_epcs AS (
+            SELECT l.zone_code, t.epc
+            FROM items i
+            JOIN locations l ON i.location_id = l.id
+            JOIN tags t ON i.tag_id = t.id
+            WHERE i.status = 'IN_STOCK'
+              AND t.status = 'IN_STOCK'
+            UNION ALL
+            SELECT l.zone_code, b.master_epc AS epc
+            FROM boxes b
+            JOIN locations l ON b.location_id = l.id
+            WHERE b.status = 'IN_RACK'
+          )
           SELECT
-            l.zone_code,
-            COUNT(DISTINCT t.epc)::INT AS total_expected
-          FROM items i
-          JOIN locations l ON i.location_id = l.id
-          JOIN tags t ON i.tag_id = t.id
-          WHERE i.status = 'IN_STOCK'
-            AND t.status = 'IN_STOCK'
-          GROUP BY l.zone_code
-          ORDER BY l.zone_code ASC
+            zone_code,
+            COUNT(DISTINCT epc)::INT AS total_expected
+          FROM zone_epcs
+          GROUP BY zone_code
+          ORDER BY zone_code ASC
         `);
 
         return reply.send({ success: true, data: result.rows });
@@ -234,29 +251,51 @@ export async function orang3OpnameRoutes(app: FastifyInstance) {
 
       try {
         const result = await db.query(
-          `SELECT p.id AS product_id, p.sku, p.name AS product_name,
-                  ARRAY_AGG(t.epc ORDER BY t.epc) AS epcs
-           FROM items i
-           JOIN locations l ON l.id = i.location_id
-           JOIN tags t ON t.id = i.tag_id
-           JOIN products p ON p.id = i.product_id
-           WHERE l.zone_code = $1
-             AND i.status = 'IN_STOCK'
-             AND t.status = 'IN_STOCK'
-           GROUP BY p.id, p.sku, p.name
-           ORDER BY p.sku ASC`,
+          `WITH zone_catalog AS (
+             SELECT p.id AS product_id, p.sku, p.name AS product_name, t.epc
+             FROM items i
+             JOIN locations l ON l.id = i.location_id
+             JOIN tags t ON t.id = i.tag_id
+             JOIN products p ON p.id = i.product_id
+             WHERE l.zone_code = $1
+               AND i.status = 'IN_STOCK'
+               AND t.status = 'IN_STOCK'
+             UNION ALL
+             SELECT p.id AS product_id, p.sku, p.name AS product_name, b.master_epc AS epc
+             FROM boxes b
+             JOIN locations l ON l.id = b.location_id
+             JOIN products p ON p.id = b.product_id
+             WHERE l.zone_code = $1
+               AND b.status = 'IN_RACK'
+           )
+           SELECT product_id, sku, product_name,
+                  ARRAY_AGG(epc ORDER BY epc) AS epcs
+           FROM zone_catalog
+           GROUP BY product_id, sku, product_name
+           ORDER BY sku ASC`,
           [zoneCode]
         );
         const misplacedSampleResult = await db.query(
-          `SELECT t.epc, l.zone_code, p.id AS product_id
-           FROM items i
-           JOIN locations l ON l.id = i.location_id
-           JOIN tags t ON t.id = i.tag_id
-           JOIN products p ON p.id = i.product_id
-           WHERE l.zone_code <> $1
-             AND i.status = 'IN_STOCK'
-             AND t.status = 'IN_STOCK'
-           ORDER BY l.zone_code ASC, t.epc ASC
+          `WITH other_zone AS (
+             SELECT t.epc, l.zone_code, p.id AS product_id
+             FROM items i
+             JOIN locations l ON l.id = i.location_id
+             JOIN tags t ON t.id = i.tag_id
+             JOIN products p ON p.id = i.product_id
+             WHERE l.zone_code <> $1
+               AND i.status = 'IN_STOCK'
+               AND t.status = 'IN_STOCK'
+             UNION ALL
+             SELECT b.master_epc AS epc, l.zone_code, p.id AS product_id
+             FROM boxes b
+             JOIN locations l ON l.id = b.location_id
+             JOIN products p ON p.id = b.product_id
+             WHERE l.zone_code <> $1
+               AND b.status = 'IN_RACK'
+           )
+           SELECT epc, zone_code, product_id
+           FROM other_zone
+           ORDER BY zone_code ASC, epc ASC
            LIMIT 1`,
           [zoneCode]
         );
@@ -391,14 +430,16 @@ if (scanned_epcs.length > 5000 || scanned_epcs.some(
         ),
       ];
 
-      // 3. Ambil daftar EPC barang yang seharusnya ada di zona sesi
+      // 3. Ambil daftar EPC barang (Tag Satuan & Master EPC Box) yang seharusnya ada di zona sesi
       const expectedResult = await db.query(
   `
   SELECT
     t.epc,
     p.id AS product_id,
     p.sku,
-    p.name AS product_name
+    p.name AS product_name,
+    1::INT AS unit_qty,
+    FALSE AS is_box
   FROM items i
   JOIN locations l ON i.location_id = l.id
   JOIN tags t ON i.tag_id = t.id
@@ -406,49 +447,105 @@ if (scanned_epcs.length > 5000 || scanned_epcs.some(
   WHERE l.zone_code = $1
     AND i.status = 'IN_STOCK'
     AND t.status = 'IN_STOCK'
+  UNION ALL
+  SELECT
+    b.master_epc AS epc,
+    p.id AS product_id,
+    p.sku,
+    p.name AS product_name,
+    b.qty_per_box::INT AS unit_qty,
+    TRUE AS is_box
+  FROM boxes b
+  JOIN locations l ON b.location_id = l.id
+  JOIN products p ON b.product_id = p.id
+  WHERE l.zone_code = $1
+    AND b.status = 'IN_RACK'
   `,
   [session.zone_code]
 );
 
-      // Ambil ringkasan stok sistem per produk berdasarkan zona
+      // Ambil ringkasan stok sistem per produk berdasarkan zona (Tag Satuan + Box IN_RACK)
 const systemStockResult = await db.query(
   `
+  WITH combined_sys AS (
+    SELECT
+      p.id AS product_id,
+      p.sku,
+      p.name AS product_name,
+      COUNT(i.id)::INT AS qty
+    FROM items i
+    JOIN products p ON i.product_id = p.id
+    JOIN locations l ON i.location_id = l.id
+    JOIN tags t ON i.tag_id = t.id
+    WHERE l.zone_code = $1
+      AND i.status = 'IN_STOCK'
+      AND t.status = 'IN_STOCK'
+    GROUP BY p.id, p.sku, p.name
+    UNION ALL
+    SELECT
+      p.id AS product_id,
+      p.sku,
+      p.name AS product_name,
+      COALESCE(SUM(b.qty_per_box), 0)::INT AS qty
+    FROM boxes b
+    JOIN products p ON b.product_id = p.id
+    JOIN locations l ON b.location_id = l.id
+    WHERE l.zone_code = $1
+      AND b.status = 'IN_RACK'
+    GROUP BY p.id, p.sku, p.name
+  )
   SELECT
-    p.id AS product_id,
-    p.sku,
-    p.name AS product_name,
-    COUNT(i.id)::INT AS system_stock
-  FROM items i
-  JOIN products p ON i.product_id = p.id
-  JOIN locations l ON i.location_id = l.id
-  JOIN tags t ON i.tag_id = t.id
-  WHERE l.zone_code = $1
-    AND i.status = 'IN_STOCK'
-    AND t.status = 'IN_STOCK'
-  GROUP BY p.id, p.sku, p.name
-  ORDER BY p.sku ASC
+    product_id,
+    sku,
+    product_name,
+    SUM(qty)::INT AS system_stock
+  FROM combined_sys
+  GROUP BY product_id, sku, product_name
+  ORDER BY sku ASC
   `,
   [session.zone_code]
 );
 
-// Tambahkan tepat di bawah systemStockResult
+// Tambahkan tepat di bawah systemStockResult (Tag Satuan + Box IN_RACK yang ter-scan)
 const scannedStockResult = await db.query(
   `
+  WITH combined_scan AS (
+    SELECT
+      p.id AS product_id,
+      p.sku,
+      p.name AS product_name,
+      COUNT(DISTINCT t.epc)::INT AS qty
+    FROM tags t
+    JOIN items i ON i.tag_id = t.id
+    JOIN products p ON i.product_id = p.id
+    JOIN locations l ON i.location_id = l.id
+    WHERE t.epc = ANY($1::text[])
+      AND l.zone_code = $2
+      AND i.status = 'IN_STOCK'
+      AND t.status = 'IN_STOCK'
+    GROUP BY p.id, p.sku, p.name
+    UNION ALL
+    SELECT
+      p.id AS product_id,
+      p.sku,
+      p.name AS product_name,
+      COALESCE(SUM(b.qty_per_box), 0)::INT AS qty
+    FROM boxes b
+    JOIN products p ON b.product_id = p.id
+    JOIN locations l ON b.location_id = l.id
+    WHERE (b.master_epc = ANY($1::text[]) OR b.box_code = ANY($1::text[]))
+      AND l.zone_code = $2
+      AND b.status = 'IN_RACK'
+    GROUP BY p.id, p.sku, p.name
+  )
   SELECT
-    p.id AS product_id,
-    p.sku,
-    p.name AS product_name,
-    COUNT(DISTINCT t.epc)::INT AS scanned_stock
-  FROM tags t
-  JOIN items i ON i.tag_id = t.id
-  JOIN products p ON i.product_id = p.id
-  JOIN locations l ON i.location_id = l.id
-  WHERE t.epc = ANY($1::text[])
-    AND l.zone_code = $2
-    AND i.status = 'IN_STOCK'
-    AND t.status = 'IN_STOCK'
-  GROUP BY p.id, p.sku, p.name
-  ORDER BY p.sku ASC
+    product_id,
+    sku,
+    product_name,
+    SUM(qty)::INT AS scanned_stock
+  FROM combined_scan
+  GROUP BY product_id, sku, product_name
+  ORDER BY sku ASC
   `,
   [uniqueEpcs, session.zone_code]
 );
@@ -462,7 +559,7 @@ const expectedMap = new Map(
 
 const expectedEpcs = new Set(expectedMap.keys());
 
-// 4. Cari EPC hasil scan di database
+// 4. Cari EPC hasil scan di database (Tag Satuan maupun Box)
 const actualResult = uniqueEpcs.length > 0
   ? await db.query(
       `
@@ -483,6 +580,23 @@ const actualResult = uniqueEpcs.length > 0
       LEFT JOIN products p ON i.product_id = p.id
       LEFT JOIN locations l ON i.location_id = l.id
       WHERE t.epc = ANY($1::text[])
+      UNION ALL
+      SELECT
+        b.master_epc AS epc,
+        CASE WHEN b.status = 'IN_RACK' THEN 'IN_STOCK' ELSE b.status END AS tag_status,
+        CASE WHEN b.status = 'IN_RACK' THEN 'IN_STOCK' ELSE b.status END AS item_status,
+        b.id AS item_id,
+        NULL::uuid AS tag_id,
+        b.location_id,
+        l.zone_code,
+        l.code AS location_code,
+        p.id AS product_id,
+        p.sku,
+        (p.name || ' [' || b.box_code || ']') AS product_name
+      FROM boxes b
+      LEFT JOIN products p ON b.product_id = p.id
+      LEFT JOIN locations l ON b.location_id = l.id
+      WHERE b.master_epc = ANY($1::text[]) OR b.box_code = ANY($1::text[])
       `,
       [uniqueEpcs]
     )

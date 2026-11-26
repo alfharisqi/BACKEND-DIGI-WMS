@@ -928,8 +928,50 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           t.updated_at DESC
       `);
 
-      const ready = res.rows.filter((r) => r.tag_status === 'AUTHORIZED_OUT');
-      const in_stock = res.rows.filter((r) => r.tag_status !== 'AUTHORIZED_OUT');
+      const boxRes = await db.query(`
+        SELECT
+          b.id AS box_id,
+          b.box_code,
+          b.master_epc AS epc,
+          CASE WHEN b.status = 'SHIPPED' THEN 'AUTHORIZED_OUT' ELSE 'IN_STOCK' END AS tag_status,
+          CASE WHEN b.status = 'SHIPPED' THEN 'AUTHORIZED_OUT' ELSE 'IN_STOCK' END AS item_status,
+          p.sku,
+          (p.name || ' [' || b.box_code || ' · ' || b.qty_per_box || 'u]') AS product_name,
+          l.code AS rack_code,
+          (
+            SELECT sm.reference_doc
+            FROM public.stock_movements sm
+            WHERE sm.product_id = b.product_id AND sm.qty_change < 0
+              AND (sm.qty_label LIKE '%' || b.box_code || '%' OR sm.reference_doc = b.box_code)
+            ORDER BY sm.created_at DESC
+            LIMIT 1
+          ) AS reference_doc,
+          CASE
+            WHEN EXISTS (
+              SELECT 1 FROM public.stock_movements sm
+              WHERE sm.product_id = b.product_id AND sm.movement_type = 'POS_SALE'
+                AND sm.qty_label LIKE '%' || b.box_code || '%'
+            ) THEN 'MEJA_KASIR_POS'
+            ELSE 'OUTBOUND_GUDANG'
+          END AS source_channel
+        FROM public.boxes b
+        INNER JOIN public.products p ON p.id = b.product_id
+        LEFT JOIN public.locations l ON l.id = b.location_id
+        WHERE b.status IN ('SHIPPED', 'IN_RACK')
+          AND NOT EXISTS (
+            SELECT 1 FROM public.gate_events ge
+            WHERE ge.epc = b.master_epc AND ge.direction = 'OUT' AND ge.authorization_status = 'AUTHORIZED_OUT'
+          )
+      `).catch(() => ({ rows: [] }));
+
+      const ready = [
+        ...res.rows.filter((r) => r.tag_status === 'AUTHORIZED_OUT'),
+        ...boxRes.rows.filter((r) => r.tag_status === 'AUTHORIZED_OUT'),
+      ];
+      const in_stock = [
+        ...res.rows.filter((r) => r.tag_status !== 'AUTHORIZED_OUT'),
+        ...boxRes.rows.filter((r) => r.tag_status !== 'AUTHORIZED_OUT'),
+      ];
 
       return {
         status: 'ok',
@@ -1000,6 +1042,114 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       );
 
       if (tagRes.rows.length === 0) {
+        // Fallback: Cek apakah EPC yang melintasi gerbang adalah Master EPC Box / Kode Box
+        const boxRes = await client.query(
+          `SELECT
+             b.id AS box_id,
+             b.box_code,
+             b.master_epc AS epc,
+             b.status AS box_status,
+             b.qty_per_box,
+             p.sku,
+             p.name AS product_name,
+             l.code AS rack_code
+           FROM public.boxes b
+           INNER JOIN public.products p ON p.id = b.product_id
+           LEFT JOIN public.locations l ON l.id = b.location_id
+           WHERE UPPER(BTRIM(b.master_epc)) = UPPER($1)
+              OR UPPER(BTRIM(b.box_code)) = UPPER($1)
+           LIMIT 1
+           FOR UPDATE OF b`,
+          [rawEpc]
+        );
+
+        if (boxRes.rows.length > 0) {
+          const boxRow = boxRes.rows[0];
+          const alreadyExited = await client.query(
+            `SELECT 1 FROM public.gate_events
+             WHERE epc = $1 AND direction = 'OUT' AND authorization_status = 'AUTHORIZED_OUT'
+             LIMIT 1`,
+            [boxRow.epc]
+          );
+          if (alreadyExited.rows.length > 0) {
+            await client.query('ROLLBACK');
+            txStarted = false;
+            return reply.code(409).send({
+              status: 'warn',
+              success: false,
+              gate_action: 'ALREADY_EXITED',
+              message: `Box ${boxRow.box_code} (${boxRow.product_name}) sudah pernah keluar gerbang sebelumnya (EXITED).`,
+            });
+          }
+
+          if (boxRow.box_status !== 'SHIPPED') {
+            const eventId = crypto.randomUUID();
+            const alarmId = crypto.randomUUID();
+            const breachNote = `TERDETEKSI BOX BELUM BAYAR / BELUM DIOTORISASI (${boxRow.box_code} · ${boxRow.box_status} di Rak ${boxRow.rack_code || '-'}) melintasi ${gate_id}!`;
+
+            await client.query(
+              `INSERT INTO public.gate_events (
+                 id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
+                 direction, authorization_status, action_taken, event_time
+               )
+               VALUES ($1, $2, $3, NULL, $4, $5, $6, 'OUT', 'UNAUTHORIZED', 'SIRENE DARURAT AKTIF - BOX BELUM BAYAR/OUTBOUND', NOW())`,
+              [eventId, gate_id, boxRow.epc, `${boxRow.product_name} [${boxRow.box_code}]`, antenna_info, rssi]
+            );
+            await client.query(
+              `INSERT INTO public.alarms (
+                 id, gate_event_id, epc, item_name, severity, siren_triggered, wa_notified, status, notes, created_at
+               )
+               VALUES ($1, $2, $3, $4, 'CRITICAL', true, false, 'ACTIVE', $5, NOW())`,
+              [alarmId, eventId, boxRow.epc, `${boxRow.product_name} [${boxRow.box_code}]`, breachNote]
+            );
+            await client.query('COMMIT');
+            txStarted = false;
+
+            publishRealtimeEvent('wms/gate/alarm', {
+              event: 'SECURITY_BREACH_ALARM',
+              severity: 'CRITICAL',
+              epc: boxRow.epc,
+              item_name: `${boxRow.product_name} [${boxRow.box_code}]`,
+              gate_id,
+              timestamp: new Date().toISOString(),
+            });
+
+            return reply.code(403).send({
+              status: 'alarm',
+              success: false,
+              alarm_triggered: true,
+              gate_action: 'ALARM_SIREN',
+              message: `🚨 ALARM SIRINE MENYALA! Box ${boxRow.box_code} (${boxRow.product_name}) masih berstatus ${boxRow.box_status} (belum bayar di Kasir / belum diterbitkan Outbound)!`,
+            });
+          }
+
+          const eventId = crypto.randomUUID();
+          await client.query(
+            `INSERT INTO public.gate_events (
+               id, gate_id, epc, tag_id, item_name, antenna_info, rssi,
+               direction, authorization_status, action_taken, event_time
+             )
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, 'OUT', 'AUTHORIZED_OUT', 'Lolos Sensor RFID Gerbang (Box Terotorisasi)', clock_timestamp())`,
+            [eventId, gate_id, boxRow.epc, `${boxRow.product_name} [${boxRow.box_code} · ${boxRow.qty_per_box}u]`, antenna_info, rssi]
+          );
+          await client.query('COMMIT');
+          txStarted = false;
+
+          return reply.send({
+            status: 'ok',
+            success: true,
+            gate_action: 'GREEN_LIGHT_OPEN',
+            message: `🟢 LAMPU HIJAU — GERBANG TERBUKA! Box ${boxRow.box_code} (${boxRow.product_name} · ${boxRow.qty_per_box} unit) SAH & resmi keluar (EXITED).`,
+            data: {
+              epc: boxRow.epc,
+              box_code: boxRow.box_code,
+              sku: boxRow.sku,
+              product_name: boxRow.product_name,
+              new_status: 'EXITED',
+            },
+          });
+        }
+
         await client.query('ROLLBACK');
         txStarted = false;
         return reply.code(404).send({
