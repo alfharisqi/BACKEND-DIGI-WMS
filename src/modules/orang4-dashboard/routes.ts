@@ -790,8 +790,42 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     return { status: 'ok', success: true, data: filtered };
   });
 
-  // 8. GET & PUT Pengaturan Sistem Gudang & Parameter RFID
+  // 8. GET & PUT Pengaturan Sistem Gudang & Parameter RFID (Tersimpan Permanen di PostgreSQL)
+  let settingsTableReady = false;
+  async function ensureSystemSettingsTable() {
+    if (settingsTableReady || !isPostgresConnected) return;
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS public.system_settings (
+        id TEXT PRIMARY KEY DEFAULT 'default',
+        warehouse_name TEXT NOT NULL DEFAULT 'Gudang Utama Jakarta Pusat',
+        rfid_frequency TEXT NOT NULL DEFAULT '920 - 923 MHz (Indonesia)',
+        rfid_gate_power_dbm INTEGER NOT NULL DEFAULT 29,
+        anti_collision_mode TEXT NOT NULL DEFAULT 'Dense Reader Mode (M=4) - EPCglobal Gen2',
+        alarm_siren_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      INSERT INTO public.system_settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
+    `);
+    settingsTableReady = true;
+  }
+
   app.get('/api/settings', async () => {
+    if (isPostgresConnected) {
+      try {
+        await ensureSystemSettingsTable();
+        const res = await db.query(
+          `SELECT warehouse_name, rfid_frequency, rfid_gate_power_dbm, anti_collision_mode, alarm_siren_enabled, updated_by, updated_at
+           FROM public.system_settings WHERE id = 'default' LIMIT 1`
+        );
+        if (res.rows.length > 0) {
+          return { status: 'ok', success: true, data: res.rows[0] };
+        }
+      } catch (err: any) {
+        console.error('[Settings GET Error]:', err.message);
+      }
+    }
+
     const s = memoryStore.settings as Record<string, unknown>;
     const enriched = {
       ...s,
@@ -805,32 +839,94 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
     return { status: 'ok', success: true, data: enriched };
   });
 
-  app.put('/api/settings', async (request) => {
-    const body = request.body as Record<string, unknown>;
+  app.put('/api/settings', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const warehouseName = String(body.warehouse_name || 'Gudang Utama Jakarta Pusat').trim();
+    const rfidFrequency = String(body.rfid_frequency || '920 - 923 MHz (Indonesia)').trim();
+    const powerDbm = Math.max(15, Math.min(33, Number(body.rfid_gate_power_dbm ?? 29) || 29));
+    const antiCollision = String(
+      body.anti_collision_mode || 'Dense Reader Mode (M=4) - EPCglobal Gen2'
+    ).trim();
+    const alarmSiren = body.alarm_siren_enabled !== false;
+    const updatedBy = String(body.updated_by || 'admin_wms').trim();
+
+    let savedSettings: Record<string, unknown> = {
+      ...memoryStore.settings,
+      warehouse_name: warehouseName,
+      rfid_frequency: rfidFrequency,
+      rfid_gate_power_dbm: powerDbm,
+      anti_collision_mode: antiCollision,
+      alarm_siren_enabled: alarmSiren,
+      updated_by: updatedBy,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (isPostgresConnected) {
+      try {
+        await ensureSystemSettingsTable();
+        const updRes = await db.query(
+          `INSERT INTO public.system_settings (
+             id, warehouse_name, rfid_frequency, rfid_gate_power_dbm,
+             anti_collision_mode, alarm_siren_enabled, updated_by, updated_at
+           )
+           VALUES ('default', $1, $2, $3, $4, $5, $6, NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             warehouse_name = EXCLUDED.warehouse_name,
+             rfid_frequency = EXCLUDED.rfid_frequency,
+             rfid_gate_power_dbm = EXCLUDED.rfid_gate_power_dbm,
+             anti_collision_mode = EXCLUDED.anti_collision_mode,
+             alarm_siren_enabled = EXCLUDED.alarm_siren_enabled,
+             updated_by = EXCLUDED.updated_by,
+             updated_at = NOW()
+           RETURNING warehouse_name, rfid_frequency, rfid_gate_power_dbm, anti_collision_mode, alarm_siren_enabled, updated_by, updated_at`,
+          [warehouseName, rfidFrequency, powerDbm, antiCollision, alarmSiren, updatedBy]
+        );
+        savedSettings = updRes.rows[0];
+
+        await db.query(
+          `INSERT INTO public.audit_logs (user_name, action, entity_type, payload, created_at)
+           VALUES ($1, 'UPDATE_SYSTEM_SETTINGS', 'SYSTEM', $2::jsonb, NOW())`,
+          [
+            updatedBy,
+            JSON.stringify({
+              role: 'ADMIN',
+              note: `Memperbarui pengaturan gudang (${warehouseName}) & daya antena ${powerDbm} dBm`,
+            }),
+          ]
+        ).catch(() => {});
+      } catch (err: any) {
+        console.error('[Settings PUT Error]:', err.message);
+        return reply.code(500).send({
+          status: 'error',
+          success: false,
+          message: `Gagal menyimpan pengaturan ke database: ${err.message}`,
+        });
+      }
+    }
+
     memoryStore.settings = {
       ...memoryStore.settings,
-      ...body,
-      updated_at: new Date().toISOString(),
+      ...savedSettings,
     };
 
     memoryStore.audit_logs.unshift({
       id: memoryStore.audit_logs.length + 1,
       user_id: 1,
-      user_name: String(body.updated_by || 'Sarah Jenkins'),
+      user_name: updatedBy,
       action: 'UPDATE_SYSTEM_SETTINGS',
       payload: {
         role: 'ADMIN',
-        note: `Memperbarui pengaturan gudang (${memoryStore.settings.warehouse_name}) & daya antena RFID`,
+        note: `Memperbarui pengaturan gudang (${warehouseName}) & daya antena ${powerDbm} dBm`,
       },
       created_at: new Date().toISOString(),
     });
 
     publishRealtimeEvent('digiwms/settings/updated', {
       event: 'SYSTEM_SETTINGS_UPDATED',
-      settings: memoryStore.settings,
+      settings: savedSettings,
     });
 
-    return { status: 'ok', success: true, data: memoryStore.settings };
+    return { status: 'ok', success: true, data: savedSettings };
   });
 
   // 9. POST Tes Broadcast Pesan Real-time via EMQX MQTT
