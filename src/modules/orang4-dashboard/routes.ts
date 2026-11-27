@@ -836,6 +836,28 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       const actionKey = String(log.action || '').toUpperCase();
       const actionLabel = ACTION_LABELS[actionKey] || actionKey.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
       const details = formatFriendlyDetails(log.action, payloadObj, actorUsername);
+      const ignoredKeys = new Set([
+        'username',
+        'full_name',
+        'role',
+        'note',
+        'method',
+        'path',
+        'password',
+        'password_hash',
+        'token',
+      ]);
+      const extraInfo: Record<string, string> = {};
+      for (const [k, v] of Object.entries(payloadObj)) {
+        if (ignoredKeys.has(k) || v === null || v === undefined || v === '') continue;
+        if (Array.isArray(v)) {
+          extraInfo[k] = `${v.length} item`;
+        } else if (typeof v === 'object') {
+          extraInfo[k] = JSON.stringify(v);
+        } else {
+          extraInfo[k] = String(v);
+        }
+      }
       return {
         id: log.id,
         actor_username: actorUsername,
@@ -843,6 +865,9 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         action: log.action,
         action_label: actionLabel,
         details,
+        method: typeof payloadObj.method === 'string' ? payloadObj.method : null,
+        path: typeof payloadObj.path === 'string' ? payloadObj.path : null,
+        extra_info: extraInfo,
         created_at: log.created_at,
       };
     });
