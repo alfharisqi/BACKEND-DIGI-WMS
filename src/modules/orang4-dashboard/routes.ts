@@ -62,6 +62,14 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
 
     let days7: Array<{ label: string; inbound: number; outbound: number; opname: number }> = [];
     let days30: Array<{ label: string; inbound: number; outbound: number; opname: number }> = [];
+    let analytics = {
+      turnoverRate: 0,
+      outbound30dUnits: 0,
+      opnameAccuracy: null as number | null,
+      totalOpnameSessions: 0,
+      avgPickingMinutes: null as number | null,
+      completedPickingOrders: 0,
+    };
 
     if (isPostgresConnected) {
       const stockRows = await getAggregatedStockByProduct();
@@ -143,6 +151,59 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         outbound: Number(r.outbound) || 0,
         opname: Number(r.opname) || 0,
       }));
+
+      // Analitik Real-Time untuk menu Laporan & Analitik
+      const [out30Res, opnameAccRes, pickSpeedRes] = await Promise.all([
+        db.query(`
+          SELECT COALESCE(SUM(ABS(qty_change)), 0)::INT AS outbound_30d
+          FROM stock_movements
+          WHERE qty_change < 0
+            AND movement_type NOT ILIKE '%OPNAME%'
+            AND created_at >= NOW() - INTERVAL '30 days'
+        `),
+        db.query(`
+          SELECT
+            COUNT(*)::INT AS total_sessions,
+            COALESCE(SUM(matched_count), 0)::INT AS sum_matched,
+            COALESCE(SUM(total_expected), 0)::INT AS sum_expected
+          FROM stocktake_sessions
+          WHERE total_expected > 0
+        `).catch(() => ({ rows: [{ total_sessions: 0, sum_matched: 0, sum_expected: 0 }] })),
+        db.query(`
+          SELECT
+            COUNT(*)::INT AS completed_orders,
+            ROUND(AVG(EXTRACT(EPOCH FROM (GREATEST(updated_at, created_at) - created_at)) / 60.0)::numeric, 1)::float8 AS avg_minutes
+          FROM picking_orders
+          WHERE status IN ('SIAP_PACKING', 'DIKIRIM')
+        `).catch(() => ({ rows: [{ completed_orders: 0, avg_minutes: null }] })),
+      ]);
+
+      const outbound30dUnits = Number(out30Res.rows[0]?.outbound_30d ?? 0);
+      const stockBase = Math.max(1, total_in_rack + total_reserved);
+      const turnoverRate = Number((outbound30dUnits / stockBase).toFixed(2));
+
+      const totalOpnameSessions = Number(opnameAccRes.rows[0]?.total_sessions ?? 0);
+      const sumMatched = Number(opnameAccRes.rows[0]?.sum_matched ?? 0);
+      const sumExpected = Number(opnameAccRes.rows[0]?.sum_expected ?? 0);
+      const opnameAccuracy =
+        totalOpnameSessions > 0 && sumExpected > 0
+          ? Number(((sumMatched / sumExpected) * 100).toFixed(1))
+          : null;
+
+      const completedPickingOrders = Number(pickSpeedRes.rows[0]?.completed_orders ?? 0);
+      const avgPickingMinutes =
+        completedPickingOrders > 0 && pickSpeedRes.rows[0]?.avg_minutes != null
+          ? Number(pickSpeedRes.rows[0].avg_minutes)
+          : null;
+
+      analytics = {
+        turnoverRate,
+        outbound30dUnits,
+        opnameAccuracy,
+        totalOpnameSessions,
+        avgPickingMinutes,
+        completedPickingOrders,
+      };
     } else {
       const ledgerStocks = getCalculatedLedgerStock();
       all_stocks = ledgerStocks;
@@ -201,6 +262,7 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
         days7,
         days30,
       },
+      analytics,
       categoryDistribution: category_distribution,
       lowStockItems: low_stock_items,
     };
