@@ -764,6 +764,68 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
       rawLogs = memoryStore.audit_logs as unknown as Array<Record<string, unknown>>;
     }
 
+    const ACTION_LABELS: Record<string, string> = {
+      USER_LOGIN: 'Masuk Sistem',
+      USER_LOGOUT: 'Keluar Sistem',
+      CREATE_USER: 'Tambah Pengguna',
+      UPDATE_USER: 'Ubah Pengguna',
+      DELETE_USER: 'Hapus Pengguna',
+      UPDATE_SETTINGS: 'Ubah Pengaturan',
+      CREATE_PRODUCT: 'Tambah Produk',
+      UPDATE_PRODUCT: 'Ubah Produk',
+      DELETE_PRODUCT: 'Hapus Produk',
+      CREATE_GRN: 'Catat Penerimaan',
+      UPDATE_GRN: 'Ubah Penerimaan',
+      VERIFY_GRN: 'Verifikasi Penerimaan',
+      CANCEL_GRN: 'Batal Penerimaan',
+      ENCODE_RFID_TAG: 'Daftar Tag RFID',
+      UPDATE_RFID_TAG: 'Ubah Tag RFID',
+      DEACTIVATE_RFID_TAG: 'Tag RFID Rusak',
+      REPLACE_RFID_TAG: 'Ganti Tag RFID',
+      RECEIVE_BOX: 'Terima Box',
+      PUTAWAY_BOX: 'Simpan Box ke Rak',
+      BREAK_PACK_BOX: 'Pecah Kemasan Box',
+      PUTAWAY_RACK: 'Simpan ke Rak',
+      CREATE_SHIPMENT: 'Buat Pengiriman',
+      AUTHORIZE_OUTBOUND: 'Izin Keluar Barang',
+      OUTBOUND_HANDOFF: 'Serah Terima Keluar',
+      CREATE_PICKING_ORDER: 'Buat Order Picking',
+      PICKING_SCAN: 'Scan Ambil Barang',
+      UPDATE_PACKING: 'Selesai Packing',
+      POS_CHECKOUT: 'Transaksi Kasir',
+      POS_RETURN: 'Retur Barang',
+      START_OPNAME: 'Mulai Stock Opname',
+      SUBMIT_OPNAME_SCAN: 'Kirim Scan Opname',
+      APPROVE_OPNAME: 'Setujui Opname',
+      GENERATE_GATE_PASS: 'Buat Gate Pass',
+      GATE_SCAN_OUT: 'Keluar Gerbang',
+      CANCEL_GATE_PASS: 'Batal Gate Pass',
+      SIMULATE_GATE_ALARM: 'Simulasi Alarm',
+    };
+
+    const formatFriendlyDetails = (action: unknown, payloadObj: Record<string, unknown>, actorName: string): string => {
+      if (typeof payloadObj.note === 'string' && payloadObj.note.trim()) {
+        return payloadObj.note.trim();
+      }
+      const act = String(action || '').toUpperCase();
+      if (act === 'USER_LOGIN') return `${actorName} berhasil masuk ke aplikasi`;
+      if (act === 'USER_LOGOUT') return `${actorName} keluar dari aplikasi`;
+      if (act === 'OUTBOUND_HANDOFF') {
+        const count = Array.isArray(payloadObj.units) ? payloadObj.units.length : 0;
+        return count > 0 ? `Serah terima ${count} unit barang keluar` : 'Serah terima barang keluar';
+      }
+      if (typeof payloadObj.message === 'string' && payloadObj.message.trim()) {
+        return payloadObj.message.trim();
+      }
+      if (typeof payloadObj.reason === 'string' && payloadObj.reason.trim()) {
+        return `Alasan: ${payloadObj.reason.trim()}`;
+      }
+      if (typeof payloadObj.warehouse_name === 'string') {
+        return `Memperbarui pengaturan gudang (${payloadObj.warehouse_name})`;
+      }
+      return ACTION_LABELS[act] || 'Aktivitas sistem tercatat';
+    };
+
     const normalized = rawLogs.map((log) => {
       const payloadObj =
         typeof log.payload === 'object' && log.payload !== null
@@ -771,12 +833,15 @@ export async function orang4DashboardRoutes(app: FastifyInstance) {
           : {};
       const actorRole = String(payloadObj.role || log.user_role || 'ADMIN');
       const actorUsername = String(log.user_name || payloadObj.username || 'admin_wms');
-      const details = String(payloadObj.note || JSON.stringify(payloadObj));
+      const actionKey = String(log.action || '').toUpperCase();
+      const actionLabel = ACTION_LABELS[actionKey] || actionKey.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+      const details = formatFriendlyDetails(log.action, payloadObj, actorUsername);
       return {
         id: log.id,
         actor_username: actorUsername,
         actor_role: actorRole,
         action: log.action,
+        action_label: actionLabel,
         details,
         created_at: log.created_at,
       };
