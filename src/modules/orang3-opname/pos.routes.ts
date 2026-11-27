@@ -120,13 +120,27 @@ app.get(
           sm.qty_change,
           t.epc,
           t.status AS tag_status,
+          (
           EXISTS (
             SELECT 1
             FROM public.stock_movements rm
             WHERE rm.movement_type = 'RETURN_RESTOCK'
               AND rm.reference_doc = sm.reference_doc
               AND rm.tag_id = sm.tag_id
-          ) AS already_returned
+          )
+          OR
+          EXISTS (
+            SELECT 1
+            FROM public.pos_return_inspections pri
+            INNER JOIN public.sales s ON s.id = pri.sale_id
+            WHERE s.invoice_or_resi = sm.reference_doc
+              AND pri.tag_id = sm.tag_id
+              AND (
+                pri.inspection_result IN ('GOOD', 'DAMAGED')
+                OR pri.follow_up_result IS NOT NULL
+              )
+          )
+        ) AS already_returned
         FROM public.stock_movements sm
         INNER JOIN public.tags t ON t.id = sm.tag_id
         LEFT JOIN public.products p ON p.id = sm.product_id
@@ -820,22 +834,40 @@ app.get(
       }
 
       const body = request.body as {
-        invoice_no?: string;
-        epc?: string;
-        reason?: string;
-        target_rack?: string;
-      };
+  invoice_no?: string;
+  epc?: string;
+  reason?: string;
+  target_rack?: string;
+  inspection_result?: 'GOOD' | 'DAMAGED' | 'NEEDS_INSPECTION';
+  notes?: string;
+};
 
       const invoiceNo = body.invoice_no?.trim();
       const epc = body.epc?.trim();
       const reason = body.reason?.trim();
       const targetRack = body.target_rack?.trim();
+      const inspectionResult = body.inspection_result;
+      const notes = body.notes?.trim() || null;
 
-      if (!invoiceNo || !epc || !reason || !targetRack) {
+      if (!invoiceNo || !epc || !reason || !inspectionResult) {
         return reply.code(400).send({
           success: false,
           message:
-            'Nomor invoice, EPC, alasan retur, dan rak tujuan wajib diisi.',
+            'Nomor invoice, EPC, alasan retur, dan hasil pemeriksaan wajib diisi.',
+        });
+      }
+
+      if (!['GOOD', 'DAMAGED', 'NEEDS_INSPECTION'].includes(inspectionResult)) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Hasil pemeriksaan barang tidak valid.',
+        });
+      }
+
+      if (inspectionResult === 'GOOD' && !targetRack) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Rak tujuan wajib diisi untuk barang dengan kondisi GOOD.',
         });
       }
 
@@ -877,13 +909,27 @@ app.get(
               sm.tag_id,
               t.epc,
               t.status AS tag_status,
-              EXISTS (
+              (
+          EXISTS (
+            SELECT 1
+            FROM public.stock_movements rm
+            WHERE rm.movement_type = 'RETURN_RESTOCK'
+              AND rm.reference_doc = sm.reference_doc
+              AND rm.tag_id = sm.tag_id
+              )
+              OR EXISTS (
                 SELECT 1
-                FROM public.stock_movements rm
-                WHERE rm.movement_type = 'RETURN_RESTOCK'
-                  AND rm.reference_doc = sm.reference_doc
-                  AND rm.tag_id = sm.tag_id
-              ) AS already_returned
+                FROM public.pos_return_inspections pri
+                WHERE pri.sale_id = (
+                  SELECT s.id
+                  FROM public.sales s
+                  WHERE s.invoice_or_resi = sm.reference_doc
+                    AND s.order_type = 'POS'
+                  LIMIT 1
+                )
+                AND pri.tag_id = sm.tag_id
+              )
+            ) AS already_returned
             FROM public.stock_movements sm
             INNER JOIN public.tags t ON t.id = sm.tag_id
             WHERE sm.movement_type = 'POS_SALE'
@@ -893,47 +939,74 @@ app.get(
         );
 
 
-        // Cegah EPC diretur lebih dari satu kali.
-        const duplicateResult = await db.query(
-          `
-          SELECT id
-          FROM public.stock_movements
-          WHERE movement_type = 'RETURN_RESTOCK'
-            AND reference_doc = $1
-            AND tag_id = $2
-          LIMIT 1
-          `,
-          [invoiceNo, returnedItem.tag_id]
-        );
+        // Periksa apakah EPC sudah memiliki riwayat retur.
+const previousInspection = await db.query(
+  `
+  SELECT
+    pri.id,
+    pri.inspection_result,
+    pri.follow_up_result
+  FROM public.pos_return_inspections pri
+  INNER JOIN public.sales s ON s.id = pri.sale_id
+  WHERE s.invoice_or_resi = $1
+    AND pri.tag_id = $2
+  ORDER BY pri.inspected_at DESC
+  LIMIT 1
+  `,
+  [invoiceNo, returnedItem.tag_id]
+);
 
-        if (duplicateResult.rows.length > 0) {
-          return reply.code(409).send({
-            success: false,
-            message: 'Barang dengan EPC tersebut sudah pernah diretur.',
-          });
+let pendingFollowUp =
+  previousInspection.rows.length > 0 &&
+  previousInspection.rows[0].inspection_result === 'NEEDS_INSPECTION' &&
+  previousInspection.rows[0].follow_up_result === null;
+
+const alreadyRestocked = await db.query(
+  `
+  SELECT 1
+  FROM public.stock_movements
+  WHERE movement_type = 'RETURN_RESTOCK'
+    AND reference_doc = $1
+    AND tag_id = $2
+  LIMIT 1
+  `,
+  [invoiceNo, returnedItem.tag_id]
+);
+
+if (
+  alreadyRestocked.rows.length > 0 ||
+  (previousInspection.rows.length > 0 && !pendingFollowUp)
+) {
+  return reply.code(409).send({
+    success: false,
+    message: 'Barang sudah pernah diretur atau pemeriksaan ulang sudah dilakukan.',
+  });
+}
+
+        // Validasi rak tujuan hanya jika barang dinyatakan GOOD.
+        let targetLocation: any = null;
+
+        if (inspectionResult === 'GOOD') {
+          const rackResult = await db.query(
+            `
+            SELECT id, code, location_type
+            FROM public.locations
+            WHERE code = $1
+              AND location_type = 'RACK'
+            LIMIT 1
+            `,
+            [targetRack]
+          );
+
+          if (rackResult.rows.length === 0) {
+            return reply.code(404).send({
+              success: false,
+              message: 'Rak tujuan tidak ditemukan atau bukan lokasi rak.',
+            });
+          }
+
+          targetLocation = rackResult.rows[0];
         }
-
-
-        // Validasi rak tujuan retur.
-        const rackResult = await db.query(
-          `
-          SELECT id, code, location_type
-          FROM public.locations
-          WHERE code = $1
-            AND location_type = 'RACK'
-          LIMIT 1
-          `,
-          [targetRack]
-        );
-
-        if (rackResult.rows.length === 0) {
-          return reply.code(404).send({
-            success: false,
-            message: 'Rak tujuan tidak ditemukan atau bukan lokasi rak.',
-          });
-        }
-
-        const targetLocation = rackResult.rows[0];
 
         const user = request.user as {
         id?: string;
@@ -1063,6 +1136,22 @@ app.get(
           // Periksa ulang retur ganda di dalam transaksi.
           const duplicateCheck = await client.query(
             `
+            SELECT
+              id,
+              inspection_result,
+              follow_up_result
+            FROM public.pos_return_inspections
+            WHERE sale_id = $1
+              AND tag_id = $2
+            ORDER BY inspected_at DESC
+            LIMIT 1
+            FOR UPDATE
+            `,
+            [lockedSaleData.id, returnedItem.tag_id]
+          );
+
+          const restockCheck = await client.query(
+            `
             SELECT id
             FROM public.stock_movements
             WHERE movement_type = 'RETURN_RESTOCK'
@@ -1073,11 +1162,19 @@ app.get(
             [invoiceNo, returnedItem.tag_id]
           );
 
-          if (duplicateCheck.rows.length > 0) {
+          pendingFollowUp =
+            duplicateCheck.rows.length > 0 &&
+            duplicateCheck.rows[0].inspection_result === 'NEEDS_INSPECTION' &&
+            duplicateCheck.rows[0].follow_up_result === null;
+
+          if (
+            restockCheck.rows.length > 0 ||
+            (duplicateCheck.rows.length > 0 && !pendingFollowUp)
+          ) {
             await client.query('ROLLBACK');
             return reply.code(409).send({
               success: false,
-              message: 'Barang ini sudah pernah diretur.',
+              message: 'Barang sudah pernah diretur atau pemeriksaan ulang sudah selesai.',
             });
           }
 
@@ -1156,70 +1253,145 @@ app.get(
           gatePassCancelled = true;
         }
 
-          // Catat penambahan stok melalui ledger.
-          await client.query(
-            `
-            INSERT INTO public.stock_movements (
-              id,
-              tx_code,
-              movement_type,
-              product_id,
-              sku,
-              tag_id,
-              from_location,
-              to_location,
-              qty_change,
-              qty_label,
-              reference_doc,
-              performed_by_name,
-              performed_by,
-              from_location_id,
-              to_location_id
-            )
-            VALUES (
-              $1, $2, 'RETURN_RESTOCK', $3, $4, $5,
-              'POS_RETURN', $6, 1, 'UNIT', $7, $8, $9, NULL, $10
-            )
-            `,
-            [
-              randomUUID(),
-              `RETURN-${randomUUID()}`,
-              returnedItem.product_id,
-              returnedItem.sku,
-              returnedItem.tag_id,
-              targetLocation.code,
-              invoiceNo,
-              user.full_name || 'Petugas POS',
-              user.id,
-              targetLocation.id,
-            ]
-          );
+                      // Catat penambahan stok melalui ledger hanya jika barang GOOD.
+                      if (inspectionResult === 'GOOD') {
+                        await client.query(
+                          `
+                          INSERT INTO public.stock_movements (
+                            id,
+                            tx_code,
+                            movement_type,
+                            product_id,
+                            sku,
+                            tag_id,
+                            from_location,
+                            to_location,
+                            qty_change,
+                            qty_label,
+                            reference_doc,
+                            performed_by_name,
+                            performed_by,
+                            from_location_id,
+                            to_location_id
+                          )
+                          VALUES (
+                            $1, $2, 'RETURN_RESTOCK', $3, $4, $5,
+                            'POS_RETURN', $6, 1, 'UNIT', $7, $8, $9, NULL, $10
+                          )
+                          `,
+                          [
+                            randomUUID(),
+                            `RETURN-${randomUUID()}`,
+                            returnedItem.product_id,
+                            returnedItem.sku,
+                            returnedItem.tag_id,
+                            targetLocation.code,
+                            invoiceNo,
+                            user.full_name || 'Petugas POS',
+                            user.id,
+                            targetLocation.id,
+                          ]
+                        );
+                      }
+                      // Perbarui status tag dan barang berdasarkan hasil pemeriksaan.
+            if (inspectionResult === 'GOOD') {
+              // Barang GOOD boleh kembali menjadi stok aktif.
+              await client.query(
+                `
+                UPDATE public.tags
+                SET status = 'IN_STOCK',
+                    updated_at = NOW()
+                WHERE id = $1
+                `,
+                [returnedItem.tag_id]
+              );
 
-          // Kembalikan status RFID menjadi IN_STOCK.
-          await client.query(
-            `
-            UPDATE public.tags
-            SET status = 'IN_STOCK',
-                updated_at = NOW()
-            WHERE id = $1
-            `,
-            [returnedItem.tag_id]
-          );
+              await client.query(
+                `
+                UPDATE public.items
+                SET status = 'IN_STOCK',
+                    location_id = $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                `,
+                [targetLocation.id, item.item_id]
+              );
+            } else {
+              // Barang DAMAGED atau NEEDS_INSPECTION ditahan.
+              await client.query(
+                `
+                UPDATE public.items
+                SET status = 'RETURNED',
+                    location_id = NULL,
+                    updated_at = NOW()
+                WHERE id = $1
+                `,
+                [item.item_id]
+              );
+            }
 
-          // Kembalikan barang ke rak tujuan.
-          await client.query(
-            `
-            UPDATE public.items
-            SET status = 'IN_STOCK',
-                location_id = $1,
-                updated_at = NOW()
-            WHERE id = $2
-            `,
-            [targetLocation.id, item.item_id]
-          );
+      // Simpan hasil pemeriksaan atau pemeriksaan ulang.
+if (pendingFollowUp) {
+  // Pemeriksaan kedua: pertahankan hasil awal dan isi follow_up_result.
+  if (!['GOOD', 'DAMAGED'].includes(inspectionResult)) {
+    await client.query('ROLLBACK');
+    return reply.code(400).send({
+      success: false,
+      message: 'Pemeriksaan ulang hanya boleh menghasilkan GOOD atau DAMAGED.',
+    });
+  }
 
-
-          // Perbarui status invoice berdasarkan seluruh barang yang sudah diretur.
+  await client.query(
+    `
+    UPDATE public.pos_return_inspections
+    SET follow_up_result = $1,
+        notes = CASE
+          WHEN $2::text IS NOT NULL THEN
+            COALESCE(notes || E'\\n', '') || $2
+          ELSE notes
+        END,
+        updated_at = NOW()
+    WHERE id = $3
+    `,
+    [
+      inspectionResult,
+      notes,
+      previousInspection.rows[0].id,
+    ]
+  );
+} else {
+  // Pemeriksaan pertama: buat riwayat baru.
+  await client.query(
+    `
+    INSERT INTO public.pos_return_inspections (
+      id,
+      sale_id,
+      tag_id,
+      inspection_result,
+      reason,
+      inspected_by,
+      inspected_at,
+      follow_up_result,
+      notes,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      $1, $2, $3, $4, $5, $6, NOW(), NULL, $7, NOW(), NOW()
+    )
+    `,
+    [
+      randomUUID(),
+      lockedSaleData.id,
+      returnedItem.tag_id,
+      inspectionResult,
+      reason,
+      user.id,
+      notes,
+    ]
+  );
+}
+    // Perbarui status invoice berdasarkan seluruh barang yang sudah diretur.
           await client.query(
             `
             UPDATE public.sales s
@@ -1235,6 +1407,12 @@ app.get(
                     WHERE rm.movement_type = 'RETURN_RESTOCK'
                       AND rm.reference_doc = sm.reference_doc
                       AND rm.tag_id = sm.tag_id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM public.pos_return_inspections pri
+                    WHERE pri.sale_id = s.id
+                      AND pri.tag_id = sm.tag_id
                   )
               )
               THEN 'RETURNED'
@@ -1301,28 +1479,38 @@ app.get(
           }
 
           return reply.send({
-            success: true,
-            message:
-            needsReplacementGatePass && !replacementGatePassIssued
-              ? 'Retur berhasil dan stok telah dikembalikan, tetapi Gate Pass pengganti gagal diterbitkan. Hubungi petugas untuk menerbitkan Gate Pass.'
-              : 'Retur berhasil dan stok telah dikembalikan.',
-            data: {
-              invoice_no: invoiceNo,
-              epc: returnedItem.epc,
-              sku: returnedItem.sku,
-              movement_type: 'RETURN_RESTOCK',
-              qty_change: 1,
-              tag_status: 'IN_STOCK',
-              item_status: 'IN_STOCK',
-              target_rack: targetLocation.code,
-              reason,
-              gate_pass_replacement_required: needsReplacementGatePass,
-              gate_pass_replacement_issued: needsReplacementGatePass
-                ? replacementGatePassIssued
-                : null,
-              gate_pass_replacement: replacementGatePass?.data || null,
-            },
-          });
+  success: true,
+  message:
+    needsReplacementGatePass && !replacementGatePassIssued
+      ? 'Retur berhasil dicatat, tetapi Gate Pass pengganti gagal diterbitkan. Hubungi petugas.'
+      : inspectionResult === 'GOOD'
+        ? 'Retur berhasil dan barang dikembalikan ke stok.'
+        : inspectionResult === 'DAMAGED'
+          ? 'Retur berhasil. Barang dinyatakan rusak dan ditahan.'
+          : 'Retur berhasil. Barang menunggu pemeriksaan lanjutan.',
+  data: {
+    invoice_no: invoiceNo,
+    epc: returnedItem.epc,
+    sku: returnedItem.sku,
+    inspection_result: inspectionResult,
+    movement_type:
+      inspectionResult === 'GOOD' ? 'RETURN_RESTOCK' : null,
+    qty_change: inspectionResult === 'GOOD' ? 1 : 0,
+    tag_status:
+      inspectionResult === 'GOOD' ? 'IN_STOCK' : item.tag_status,
+    item_status:
+      inspectionResult === 'GOOD' ? 'IN_STOCK' : 'RETURNED',
+    target_rack:
+      inspectionResult === 'GOOD' ? targetLocation.code : null,
+    reason,
+    notes,
+    gate_pass_replacement_required: needsReplacementGatePass,
+    gate_pass_replacement_issued: needsReplacementGatePass
+      ? replacementGatePassIssued
+      : null,
+    gate_pass_replacement: replacementGatePass?.data || null,
+  },
+});
         } catch (error) {
   if (!committed) {
     await client.query('ROLLBACK').catch(() => undefined);
