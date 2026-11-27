@@ -78,7 +78,10 @@ export async function getStockByRack() {
         COUNT(i.id)::INT AS quantity,
         COUNT(i.id) FILTER (WHERE i.status = 'IN_STOCK')::INT AS available_quantity,
         COUNT(i.id) FILTER (WHERE i.status = 'RESERVED')::INT AS reserved_quantity,
-        COUNT(i.id) FILTER (WHERE i.status = 'AUTHORIZED_OUT')::INT AS authorized_out_quantity
+        COUNT(i.id) FILTER (WHERE i.status = 'AUTHORIZED_OUT')::INT AS authorized_out_quantity,
+        COUNT(i.id)::INT AS unit_quantity,
+        0::INT AS box_count,
+        0::INT AS box_quantity
       FROM items i
       INNER JOIN products p ON p.id = i.product_id
       INNER JOIN locations l ON l.id = i.location_id
@@ -98,7 +101,10 @@ export async function getStockByRack() {
         COALESCE(SUM(b.qty_per_box), 0)::INT AS quantity,
         COALESCE(SUM(b.qty_per_box), 0)::INT AS available_quantity,
         0::INT AS reserved_quantity,
-        0::INT AS authorized_out_quantity
+        0::INT AS authorized_out_quantity,
+        0::INT AS unit_quantity,
+        COUNT(b.id)::INT AS box_count,
+        COALESCE(SUM(b.qty_per_box), 0)::INT AS box_quantity
       FROM boxes b
       INNER JOIN products p ON p.id = b.product_id
       INNER JOIN locations l ON l.id = b.location_id
@@ -122,7 +128,10 @@ export async function getStockByRack() {
       SUM(quantity)::INT AS quantity,
       SUM(available_quantity)::INT AS available_quantity,
       SUM(reserved_quantity)::INT AS reserved_quantity,
-      SUM(authorized_out_quantity)::INT AS authorized_out_quantity
+      SUM(authorized_out_quantity)::INT AS authorized_out_quantity,
+      SUM(unit_quantity)::INT AS unit_quantity,
+      SUM(box_count)::INT AS box_count,
+      SUM(box_quantity)::INT AS box_quantity
     FROM combined
     GROUP BY location_id, rack_code, rack_name, product_id, sku, product_name, category
     ORDER BY rack_code ASC, sku ASC
@@ -134,5 +143,8 @@ export async function getStockByRack() {
     available_quantity: Number(row.available_quantity),
     reserved_quantity: Number(row.reserved_quantity),
     authorized_out_quantity: Number(row.authorized_out_quantity),
+    unit_quantity: Number(row.unit_quantity ?? 0),
+    box_count: Number(row.box_count ?? 0),
+    box_quantity: Number(row.box_quantity ?? 0),
   }));
 }

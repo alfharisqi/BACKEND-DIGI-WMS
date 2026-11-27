@@ -1,10 +1,13 @@
-import { FastifyInstance } from 'fastify';
+import { FastifyInstance, FastifyReply } from 'fastify';
 import type { PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
 
 import { db, isPostgresConnected } from '../../config/db';
 import { publishRealtimeEvent } from '../../config/mqtt';
+import { authenticate, requireRoles } from '../../middleware/auth';
 import { getAggregatedStockByProduct } from './stock.service';
+import { HandoffError, lockShipmentSource, posOrdersForHandoff, shipmentSource, sourceId, validateShipmentItems } from './outbound-handoff';
+import { recordGateAuthorization } from '../gate-authorization';
 
 type OutboundBody = {
   invoice_or_resi?: string;
@@ -12,7 +15,12 @@ type OutboundBody = {
   courier?: string;
   epcs?: string[];
   total_amount?: number;
+  source?: unknown;
 };
+
+function handoffFailure(reply: FastifyReply, error: HandoffError) {
+  return reply.code(error.statusCode).send({ success: false, message: error.message, code: error.errorCode });
+}
 
 export async function outboundRoutes(app: FastifyInstance) {
 
@@ -21,6 +29,7 @@ export async function outboundRoutes(app: FastifyInstance) {
   // ==========================================
   app.get('/api/outbound/picking-orders', async (request, reply) => {
     try {
+      const forHandoff = (request.query as { for_handoff?: string }).for_handoff === '1';
       if (!isPostgresConnected) {
         return reply.code(503).send({
           success: false,
@@ -36,6 +45,7 @@ export async function outboundRoutes(app: FastifyInstance) {
             po.destination,
             po.courier,
             po.status,
+            'OUTBOUND_PICKING'::text AS source_type,
             po.total_items,
             po.scanned_items,
             po.created_at,
@@ -63,6 +73,16 @@ export async function outboundRoutes(app: FastifyInstance) {
           LEFT JOIN outbound_picking_items pi ON pi.order_id = po.id
           LEFT JOIN products p ON p.id = pi.product_id
           LEFT JOIN locations l ON l.id = pi.location_id
+          WHERE NOT $1::boolean OR (po.status = 'SIAP_PACKING' AND pi.is_scanned
+            AND EXISTS (
+              SELECT 1 FROM public.tags t JOIN public.items i ON i.tag_id = t.id
+              WHERE t.id = pi.tag_id AND i.id = pi.item_id AND t.epc = pi.epc
+                AND t.status = i.status AND t.status IN ('RESERVED', 'AUTHORIZED_OUT')
+                AND NOT EXISTS (
+                  SELECT 1 FROM public.stock_movements sm
+                  WHERE sm.tag_id = t.id AND sm.movement_type = 'OUTBOUND_SHIPMENT' AND sm.created_at >= pi.scanned_at
+                )
+            ))
           GROUP BY po.id
         ),
         orang1_orders AS (
@@ -86,6 +106,7 @@ export async function outboundRoutes(app: FastifyInstance) {
               WHEN pack.status = 'SELESAI_PACKING' THEN 'SELESAI_PACKING'
               ELSE o.status
             END AS status,
+            'PICKING_ORANG1'::text AS source_type,
             COUNT(ps.id)::int AS total_items,
             COUNT(ps.id)::int AS scanned_items,
             o.created_at,
@@ -113,13 +134,24 @@ export async function outboundRoutes(app: FastifyInstance) {
           LEFT JOIN public.picking_packing pack ON pack.order_id = o.id
           LEFT JOIN public.picking_scans ps ON ps.order_id = o.id AND ps.released_at IS NULL
           LEFT JOIN public.products p ON p.id = ps.product_id
+          WHERE o.status <> 'DIBATALKAN'
+            AND (NOT $1::boolean OR (o.status = 'SIAP_PACKING' AND pack.status = 'SELESAI_PACKING'
+              AND EXISTS (
+                SELECT 1 FROM public.tags t JOIN public.items i ON i.tag_id = t.id
+                WHERE t.id = ps.tag_id AND i.id = ps.item_id AND t.epc = ps.epc
+                  AND t.status = i.status AND t.status IN ('RESERVED', 'AUTHORIZED_OUT')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM public.stock_movements sm
+                    WHERE sm.tag_id = t.id AND sm.movement_type = 'OUTBOUND_SHIPMENT' AND sm.created_at >= ps.scanned_at
+                  )
+              )))
           GROUP BY o.id, pack.status
         )
         SELECT * FROM orang1_orders
         UNION ALL
         SELECT * FROM legacy_orders
         ORDER BY created_at DESC
-      `);
+      `, [forHandoff]);
 
       return reply.send({
         success: true,
@@ -270,6 +302,8 @@ export async function outboundRoutes(app: FastifyInstance) {
           throw error;
         }
       }
+
+      await validateShipmentItems(client, { type: 'STOK_BEBAS' }, itemResult.rows);
 
       const orderResult = await client.query(
         `
@@ -632,6 +666,38 @@ export async function outboundRoutes(app: FastifyInstance) {
   // ==========================================
   // GET RIWAYAT PENGIRIMAN OUTBOUND
   // ==========================================
+  app.get('/api/outbound/pos-orders', {
+    preHandler: [
+      async (request, reply) => {
+        if (!/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/.test(request.headers.authorization ?? '')) {
+          return reply.code(401).send({ success: false, message: 'Login untuk melihat sumber Pengiriman POS.' });
+        }
+        if (!process.env.JWT_SECRET) {
+          return reply.code(503).send({ success: false, message: 'Konfigurasi autentikasi belum tersedia.' });
+        }
+      },
+      authenticate,
+      requireRoles('ADMIN', 'SUPERVISOR', 'WAREHOUSE_STAFF', 'OPERATOR', 'KASIR', 'KASIR_POS'),
+    ],
+  }, async (request, reply) => {
+    if (!isPostgresConnected) {
+      return reply.code(503).send({ success: false, message: 'Database PostgreSQL belum terhubung.' });
+    }
+    try {
+      const account = await db.query(`
+        SELECT 1 FROM public.users WHERE id::text = $1 AND is_active AND upper(role) = $2`,
+      [String(request.user?.id), String(request.user?.role).toUpperCase()]);
+      if (account.rowCount !== 1) {
+        return reply.code(403).send({ success: false, message: 'Akun atau hak akses POS sudah berubah.' });
+      }
+      const { rows } = await db.query(posOrdersForHandoff);
+      return { success: true, data: rows };
+    } catch (error) {
+      request.log.error(error, 'GET OUTBOUND POS SOURCES ERROR');
+      return reply.code(500).send({ success: false, message: 'Gagal mengambil sumber Pengiriman POS.' });
+    }
+  });
+
   app.get('/api/outbound/shipments', async (request, reply) => {
     try {
       if (!isPostgresConnected) {
@@ -652,14 +718,20 @@ export async function outboundRoutes(app: FastifyInstance) {
           s.total_items,
           s.total_amount,
           s.payment_status,
-          s.shipping_status,
+          CASE WHEN handoff.payload->>'source_type' = 'POS' AND gp.status = 'USED'
+            THEN 'SHIPPED / TELAH KELUAR' ELSE s.shipping_status END AS shipping_status,
           s.created_at,
           gp.pass_code AS gate_pass_number,
           gp.status AS gate_pass_status,
           (gp.status = 'ACTIVE') AS gate_pass_valid,
           gp.created_at AS gate_pass_issued_at,
-          shipment_items.items
+          COALESCE(handoff.payload->'items', shipment_items.items::jsonb) AS items
         FROM sales s
+        LEFT JOIN LATERAL (
+          SELECT a.payload FROM public.audit_logs a
+          WHERE a.action = 'OUTBOUND_HANDOFF' AND a.entity_id = s.id::text
+          ORDER BY a.created_at DESC LIMIT 1
+        ) handoff ON TRUE
         LEFT JOIN LATERAL (
           SELECT
             COALESCE(
@@ -677,9 +749,12 @@ export async function outboundRoutes(app: FastifyInstance) {
             NULLIF(to_jsonb(gp)->>'created_at', '')::timestamptz AS created_at
           FROM public.gate_passes gp
           WHERE
-            COALESCE(to_jsonb(gp)->>'sale_id', '') = s.id::text
-            OR COALESCE(to_jsonb(gp)->>'reference_resi', '') = s.invoice_or_resi
-            OR COALESCE(to_jsonb(gp)->>'reference_doc', '') = s.invoice_or_resi
+            (handoff.payload->>'source_type' = 'POS' AND gp.id::text = handoff.payload->>'gate_pass_id')
+            OR (COALESCE(handoff.payload->>'source_type', '') <> 'POS' AND (
+              COALESCE(to_jsonb(gp)->>'sale_id', '') = s.id::text
+              OR COALESCE(to_jsonb(gp)->>'reference_resi', '') = s.invoice_or_resi
+              OR COALESCE(to_jsonb(gp)->>'reference_doc', '') = s.invoice_or_resi
+            ))
           ORDER BY
             NULLIF(to_jsonb(gp)->>'created_at', '')::timestamptz DESC NULLS LAST
           LIMIT 1
@@ -688,7 +763,7 @@ export async function outboundRoutes(app: FastifyInstance) {
           SELECT COALESCE(
             json_agg(
               json_build_object(
-                'epc', t.epc,
+                'epc', COALESCE(t.epc, sm.qty_label, '-'),
                 'sku', sm.sku,
                 'product_name', p.name,
                 'qty', ABS(sm.qty_change)
@@ -728,7 +803,7 @@ export async function outboundRoutes(app: FastifyInstance) {
   // POST OTORISASI BARANG KELUAR
   // ==========================================
   app.post('/api/outbound/authorize', async (request, reply) => {
-    const body = (request.body ?? {}) as { epcs?: string[] };
+    const body = (request.body ?? {}) as Pick<OutboundBody, 'epcs' | 'source'>;
     const epcs = body.epcs;
 
     if (
@@ -750,6 +825,17 @@ export async function outboundRoutes(app: FastifyInstance) {
       });
     }
 
+    let source: ReturnType<typeof shipmentSource>;
+    try {
+      source = shipmentSource(body.source);
+      if (source.type === 'POS' || source.type === 'PICKING_ORANG1') {
+        throw new HandoffError(409, 'Sumber ini menggunakan otorisasi Packing atau transaksi POS.');
+      }
+    } catch (error) {
+      if (error instanceof HandoffError) return handoffFailure(reply, error);
+      throw error;
+    }
+
     if (!isPostgresConnected) {
       return reply.code(503).send({
         success: false,
@@ -764,6 +850,8 @@ export async function outboundRoutes(app: FastifyInstance) {
       client = await db.connect();
       await client.query('BEGIN');
       transactionStarted = true;
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      await lockShipmentSource(client, source);
 
       const result = await client.query(
         `
@@ -777,54 +865,33 @@ export async function outboundRoutes(app: FastifyInstance) {
           p.sku,
           p.name AS product_name,
           l.code AS location_code,
-          l.location_type,
-          EXISTS (
-            SELECT 1
-            FROM outbound_picking_items pi
-            INNER JOIN outbound_picking_orders po ON po.id = pi.order_id
-            WHERE pi.item_id = i.id
-              AND pi.is_scanned = TRUE
-              AND po.status = 'SIAP_PACKING'
-          ) AS picking_ready
+          l.location_type
         FROM tags t
         INNER JOIN items i ON i.tag_id = t.id
         INNER JOIN products p ON p.id = i.product_id
         LEFT JOIN locations l ON l.id = i.location_id
-        WHERE t.epc = ANY($1::text[])
+        WHERE UPPER(BTRIM(t.epc)) = ANY($1::text[])
         ORDER BY t.epc
         FOR UPDATE OF t, i
         `,
-        [normalizedEpcs]
+        [normalizedEpcs.map((e) => e.toUpperCase())]
       );
 
       if (result.rows.length !== normalizedEpcs.length) {
-        const error = new Error('Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.') as Error & { statusCode: number };
+        const foundSet = new Set(result.rows.map((r: any) => String(r.epc || '').trim().toUpperCase()));
+        const missing = normalizedEpcs.filter((e) => !foundSet.has(e.toUpperCase()));
+        const error = new Error(
+          missing.length > 0
+            ? `Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk: ${missing.join(', ')}`
+            : 'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
+        ) as Error & { statusCode: number };
         error.statusCode = 404;
         throw error;
       }
 
-      for (const item of result.rows) {
-        const isAvailable =
-          item.tag_status === 'IN_STOCK' &&
-          item.item_status === 'IN_STOCK';
-
-        const isReadyFromPicking =
-          item.tag_status === 'RESERVED' &&
-          item.item_status === 'RESERVED' &&
-          item.picking_ready === true;
-
-        if (!isAvailable && !isReadyFromPicking) {
-          const error = new Error(
-            `EPC ${item.epc} tidak dapat diotorisasi. Status tag: ${item.tag_status}; status item: ${item.item_status}.`
-          ) as Error & { statusCode: number };
-          error.statusCode = 409;
-          throw error;
-        }
-        if (!item.location_id || item.location_type !== 'RACK') {
-          const error = new Error(`EPC ${item.epc} belum ditempatkan pada rak penyimpanan yang valid.`) as Error & { statusCode: number };
-          error.statusCode = 409;
-          throw error;
-        }
+      await validateShipmentItems(client, source, result.rows);
+      if (result.rows.some(item => !item.location_id || item.location_type !== 'RACK')) {
+        throw new HandoffError(409, 'Barang belum ditempatkan pada rak penyimpanan yang valid.');
       }
 
       for (const item of result.rows) {
@@ -852,6 +919,14 @@ export async function outboundRoutes(app: FastifyInstance) {
         }
       }
 
+      let authorizationId: string | undefined;
+      if (source.type === 'STOK_BEBAS') {
+        const audit = await client.query<{ id: string }>(`
+          INSERT INTO public.audit_logs (action, entity_type, payload, created_at)
+          VALUES ('OUTBOUND_PREAUTHORIZED', 'outbound_authorization', $1::jsonb, now()) RETURNING id`,
+        [JSON.stringify({ tag_ids: result.rows.map(item => item.tag_id) })]);
+        authorizationId = audit.rows[0].id;
+      }
       await client.query('COMMIT');
       transactionStarted = false;
 
@@ -859,6 +934,7 @@ export async function outboundRoutes(app: FastifyInstance) {
         success: true,
         message: 'Otorisasi barang keluar berhasil.',
         total: result.rows.length,
+        authorization_id: authorizationId,
         data: result.rows.map((item: any) => ({
           epc: item.epc,
           sku: item.sku,
@@ -878,6 +954,10 @@ export async function outboundRoutes(app: FastifyInstance) {
       }
 
       const error = err as Error & { statusCode?: number };
+      if (err instanceof HandoffError) return handoffFailure(reply, err);
+      if (['55P03', '40P01'].includes((err as { code?: string }).code ?? '')) {
+        return handoffFailure(reply, new HandoffError(409, 'Sumber Pengiriman sedang diproses. Muat ulang dan coba lagi.'));
+      }
       if (error.statusCode) {
         return reply.code(error.statusCode).send({ success: false, message: error.message });
       }
@@ -952,6 +1032,14 @@ export async function outboundRoutes(app: FastifyInstance) {
       });
     }
 
+    let source: ReturnType<typeof shipmentSource>;
+    try {
+      source = shipmentSource(body.source);
+    } catch (error) {
+      if (error instanceof HandoffError) return handoffFailure(reply, error);
+      throw error;
+    }
+
     if (!isPostgresConnected) {
       return reply.code(503).send({
         success: false,
@@ -968,7 +1056,16 @@ export async function outboundRoutes(app: FastifyInstance) {
       await client.query('BEGIN');
       transactionStarted = true;
 
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      const posSale = await lockShipmentSource(client, source);
+      const pickingReference = await client.query(`
+        SELECT 1 FROM public.picking_orders
+        WHERE $1 IN (order_number, 'RESI-' || order_number) AND id IS DISTINCT FROM $2::uuid LIMIT 1`,
+      [invoice, source.type === 'PICKING_ORANG1' ? source.order_id : null]);
+      if (pickingReference.rowCount) throw new HandoffError(409, 'Nomor resi merujuk ke order Picking lain.');
+
       // 4. Kunci seluruh barang yang akan dikirim.
+      const upperEpcs = normalizedEpcs.map((e) => e.toUpperCase());
       const itemResult = await client.query(
         `
         SELECT
@@ -981,31 +1078,92 @@ export async function outboundRoutes(app: FastifyInstance) {
           i.location_id,
           p.sku,
           p.name AS product_name,
-          l.name AS location_name
+          l.name AS location_name,
+          l.location_type
         FROM tags t
         INNER JOIN items i ON i.tag_id = t.id
         INNER JOIN products p ON p.id = i.product_id
         LEFT JOIN locations l ON l.id = i.location_id
-        WHERE t.epc = ANY($1::text[])
+        WHERE UPPER(BTRIM(t.epc)) = ANY($1::text[])
         ORDER BY t.epc
         FOR UPDATE OF t, i
         `,
-        [normalizedEpcs]
+        [upperEpcs]
       );
 
-      if (itemResult.rows.length !== normalizedEpcs.length) {
+      let boxRows: any[] = [];
+      if (itemResult.rows.length < normalizedEpcs.length && source.type === 'STOK_BEBAS') {
+        const foundTagEpcs = new Set(
+          itemResult.rows.map((r: any) => String(r.epc || '').trim().toUpperCase())
+        );
+        const remainingCodes = upperEpcs.filter((e) => !foundTagEpcs.has(e));
+        if (remainingCodes.length > 0) {
+          const boxRes = await client.query(
+            `
+            SELECT
+              b.id AS box_id,
+              b.box_code,
+              b.master_epc,
+              b.status AS box_status,
+              b.qty_per_box,
+              b.product_id,
+              b.location_id,
+              p.sku,
+              p.name AS product_name,
+              l.name AS location_name,
+              l.location_type
+            FROM public.boxes b
+            INNER JOIN public.products p ON p.id = b.product_id
+            LEFT JOIN public.locations l ON l.id = b.location_id
+            WHERE UPPER(BTRIM(b.master_epc)) = ANY($1::text[])
+               OR UPPER(BTRIM(b.box_code)) = ANY($1::text[])
+            ORDER BY b.box_code
+            FOR UPDATE OF b
+            `,
+            [remainingCodes]
+          );
+          boxRows = boxRes.rows;
+        }
+      }
+
+      if (itemResult.rows.length + boxRows.length !== normalizedEpcs.length) {
+        const foundSet = new Set([
+          ...itemResult.rows.map((r: any) => String(r.epc || '').trim().toUpperCase()),
+          ...boxRows.map((b: any) => String(b.master_epc || '').trim().toUpperCase()),
+          ...boxRows.map((b: any) => String(b.box_code || '').trim().toUpperCase()),
+        ]);
+        const missing = normalizedEpcs.filter((e) => !foundSet.has(e.toUpperCase()));
         const error = new Error(
-          'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
+          missing.length > 0
+            ? `Ada EPC atau Box yang tidak ditemukan atau belum terhubung dengan item dan produk: ${missing.join(', ')}`
+            : 'Ada EPC yang tidak ditemukan atau belum terhubung dengan item dan produk.'
         ) as Error & { statusCode: number };
 
         error.statusCode = 404;
         throw error;
       }
 
+      if (itemResult.rows.length > 0) {
+        await validateShipmentItems(client, source, itemResult.rows);
+      }
+
+      for (const box of boxRows) {
+        if (box.box_status !== 'IN_RACK' || box.location_type !== 'RACK') {
+          throw new HandoffError(
+            409,
+            `Box ${box.box_code} (${box.master_epc}) berstatus ${box.box_status} dan belum berada di Rak Penyimpanan.`
+          );
+        }
+      }
+
+      const totalShipmentUnits =
+        itemResult.rows.length +
+        boxRows.reduce((sum, b) => sum + Number(b.qty_per_box || 0), 0);
+
       // 5. Kunci rak asal agar jumlah isi rak aman dari transaksi bersamaan.
       const locationIds = [
         ...new Set(
-          itemResult.rows
+          [...itemResult.rows, ...boxRows]
             .map((item: any) => item.location_id)
             .filter((id: string | null) => Boolean(id))
         ),
@@ -1022,23 +1180,6 @@ export async function outboundRoutes(app: FastifyInstance) {
           `,
           [locationIds]
         );
-      }
-
-      // 6. Terima barang yang sudah diotorisasi (AUTHORIZED_OUT), sudah di-pick/pack (RESERVED),
-      // maupun stok siap kirim dari rak (IN_STOCK), lalu otomatis otorisasi untuk Gate Pass.
-      const allowedStatuses = new Set(['AUTHORIZED_OUT', 'RESERVED', 'IN_STOCK']);
-      for (const item of itemResult.rows) {
-        if (
-          !allowedStatuses.has(String(item.tag_status).toUpperCase()) ||
-          !allowedStatuses.has(String(item.item_status).toUpperCase())
-        ) {
-          const error = new Error(
-            `EPC ${item.epc} tidak dapat dikirim (status tag: ${item.tag_status}, status item: ${item.item_status}). Barang mungkin sudah keluar (EXITED) atau belum di-putaway.`
-          ) as Error & { statusCode: number };
-
-          error.statusCode = 409;
-          throw error;
-        }
       }
 
       // 6. Simpan data pengiriman.
@@ -1061,17 +1202,22 @@ export async function outboundRoutes(app: FastifyInstance) {
           invoice,
           destination,
           courier,
-          itemResult.rows.length,
+          totalShipmentUnits,
           totalAmount,
         ]
       );
 
       const sale = saleResult.rows[0];
 
-      // Buat Gate Pass otomatis sebagai dokumen pickup ekspedisi (berlaku 24 jam).
-      const gatePassNumber = `GP-${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`;
-      const gatePassResult = await client.query(
-        `
+      // POS keeps the existing sale as the Gate reference because its EPCs
+      // are recorded against the POS invoice, not the courier's resi.
+      let gatePass = posSale ? (await client.query(`
+        SELECT * FROM public.gate_passes
+        WHERE sale_id = $1 AND status = 'ACTIVE' AND valid_until > now()
+        ORDER BY created_at DESC, id LIMIT 1 FOR SHARE NOWAIT`, [posSale.id])).rows[0] : undefined;
+      if (!gatePass) {
+        const gatePassNumber = `GP-${randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()}`;
+        gatePass = (await client.query(`
         INSERT INTO public.gate_passes (
           pass_code,
           sale_id,
@@ -1081,10 +1227,17 @@ export async function outboundRoutes(app: FastifyInstance) {
         )
         VALUES ($1, $2, $3, 'ACTIVE', NOW() + INTERVAL '24 hours')
         RETURNING *
-        `,
-        [gatePassNumber, sale.id, invoice]
-      );
-      const gatePass = gatePassResult.rows[0];
+        `, [gatePassNumber, posSale?.id ?? sale.id, posSale?.invoice_or_resi ?? invoice])).rows[0];
+        await recordGateAuthorization(
+          client,
+          gatePass.id,
+          [
+            ...itemResult.rows.map(({ epc, tag_id }: any) => ({ epc, tag_id })),
+            ...boxRows.map((b: any) => ({ epc: b.master_epc, box_id: b.box_id })),
+          ],
+          posSale?.invoice_or_resi ?? invoice
+        );
+      }
 
       const ledgerEntries = [];
 
@@ -1097,10 +1250,10 @@ export async function outboundRoutes(app: FastifyInstance) {
           SET status = 'AUTHORIZED_OUT',
               updated_at = NOW()
           WHERE id = $1
-            AND status IN ('AUTHORIZED_OUT', 'RESERVED', 'IN_STOCK')
+            AND status = $2
           RETURNING id
           `,
-          [item.item_id]
+          [item.item_id, item.item_status]
         );
 
         if (updateItem.rows.length === 0) {
@@ -1115,10 +1268,10 @@ export async function outboundRoutes(app: FastifyInstance) {
           SET status = 'AUTHORIZED_OUT',
               updated_at = NOW()
           WHERE id = $1
-            AND status IN ('AUTHORIZED_OUT', 'RESERVED', 'IN_STOCK')
+            AND status = $2
           RETURNING id
           `,
-          [item.tag_id]
+          [item.tag_id, item.tag_status]
         );
 
         if (updateTag.rows.length === 0) {
@@ -1127,7 +1280,9 @@ export async function outboundRoutes(app: FastifyInstance) {
           );
         }
 
-        // Catat mutasi stok ke ledger.
+        if (posSale) continue;
+
+        // The shipment is the first debit for this source.
         const ledgerResult = await client.query(
           `
           INSERT INTO stock_movements (
@@ -1175,6 +1330,84 @@ export async function outboundRoutes(app: FastifyInstance) {
         ledgerEntries.push(ledgerResult.rows[0]);
       }
 
+      // 7B. Proses pengiriman kemasan Box utuh (jika ada Box yang dipilih)
+      for (const box of boxRows) {
+        const updBox = await client.query(
+          `
+          UPDATE public.boxes
+          SET status = 'SHIPPED'
+          WHERE id = $1 AND status = 'IN_RACK'
+          RETURNING id
+          `,
+          [box.box_id]
+        );
+        if (updBox.rows.length === 0) {
+          throw new Error(`Status Box ${box.box_code} berubah. Transaksi dibatalkan.`);
+        }
+
+        const boxQty = Number(box.qty_per_box || 1);
+        const boxLedgerRes = await client.query(
+          `
+          INSERT INTO stock_movements (
+            tx_code,
+            movement_type,
+            product_id,
+            sku,
+            tag_id,
+            from_location,
+            to_location,
+            qty_change,
+            qty_label,
+            reference_doc,
+            performed_by_name,
+            from_location_id,
+            to_location_id
+          )
+          VALUES (
+            'OUT-BOX-' || REPLACE(gen_random_uuid()::TEXT, '-', ''),
+            'OUTBOUND_SHIPMENT',
+            $1,
+            $2,
+            NULL,
+            COALESCE($3, 'Gudang'),
+            'Outbound / Pengiriman',
+            $4,
+            $5,
+            $6,
+            'System',
+            $7,
+            NULL
+          )
+          RETURNING *
+          `,
+          [
+            box.product_id,
+            box.sku,
+            box.location_name,
+            -boxQty,
+            `${box.box_code} (${box.master_epc})`,
+            invoice,
+            box.location_id,
+          ]
+        );
+
+        ledgerEntries.push(boxLedgerRes.rows[0]);
+      }
+
+      await client.query(`
+        INSERT INTO public.audit_logs (action, entity_type, entity_id, payload)
+        VALUES ('OUTBOUND_HANDOFF', 'outbound_shipment', $1, $2::jsonb)`, [sale.id, JSON.stringify({
+        source_type: source.type,
+        source_id: sourceId(source),
+        gate_pass_id: gatePass.id,
+        tag_ids: itemResult.rows.map(item => item.tag_id),
+        box_ids: boxRows.map(b => b.box_id),
+        items: [
+          ...itemResult.rows.map(item => ({ epc: item.epc, sku: item.sku, product_name: item.product_name, qty: 1 })),
+          ...boxRows.map(b => ({ epc: b.master_epc, box_code: b.box_code, sku: b.sku, product_name: b.product_name, qty: Number(b.qty_per_box || 1) })),
+        ],
+      })]);
+
       // 8. Kapasitas rak diperbarui otomatis oleh trigger PostgreSQL
       // trg_refresh_rack_capacity setelah UPDATE items.location_id.
       // Jangan mengubah locations.current_items_count secara manual di sini.
@@ -1184,10 +1417,9 @@ export async function outboundRoutes(app: FastifyInstance) {
       transactionStarted = false;
 
       // 9. Ambil saldo terbaru setelah commit.
-      const stockData = await getAggregatedStockByProduct();
-
       // 10. Kirim event realtime setelah transaksi berhasil.
       try {
+        const stockData = await getAggregatedStockByProduct();
         publishRealtimeEvent('wms/stock/realtime', {
           event: 'OUTBOUND_SHIPMENT_COMPLETED',
           invoice_or_resi: invoice,
@@ -1202,12 +1434,12 @@ export async function outboundRoutes(app: FastifyInstance) {
 
       return reply.code(201).send({
         success: true,
-        message: 'Pengiriman dan mutasi stok berhasil dicatat.',
+        message: posSale ? 'Pengiriman POS berhasil dicatat.' : 'Pengiriman dan mutasi stok berhasil dicatat.',
         data: {
           shipment: sale,
           gate_pass: gatePass,
           total_items: itemResult.rows.length,
-          total_qty_change: -itemResult.rows.length,
+          total_qty_change: -ledgerEntries.length || 0,
           ledger: ledgerEntries,
         },
       });
@@ -1226,6 +1458,10 @@ export async function outboundRoutes(app: FastifyInstance) {
         code?: string;
       };
 
+      if (err instanceof HandoffError) return handoffFailure(reply, err);
+      if (error.code === '55P03' || error.code === '40P01') {
+        return handoffFailure(reply, new HandoffError(409, 'Sumber Pengiriman sedang diproses. Muat ulang dan coba lagi.'));
+      }
       if (error.code === '23505') {
         return reply.code(409).send({
           success: false,

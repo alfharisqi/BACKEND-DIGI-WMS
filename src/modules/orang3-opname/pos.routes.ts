@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { db, isPostgresConnected } from '../../config/db';
 import { authenticate, requireRoles } from '../../middleware/auth';
 import { publishRealtimeEvent } from '../../config/mqtt';
+import { pendingPosBoxEpcs } from '../gate-authorization';
 
 /**
  * MODUL ORANG 3: KASIR POS & MODUL RETUR
@@ -112,6 +113,7 @@ app.get(
       const itemsResult = await db.query(
         `
         SELECT
+          sm.id AS movement_id,
           sm.tag_id,
           sm.product_id,
           sm.sku,
@@ -141,9 +143,26 @@ app.get(
               )
           )
         ) AS already_returned
+          sm.qty_label,
+          b.box_code,
+          COALESCE(t.epc, b.master_epc, sm.qty_label) AS epc,
+          COALESCE(t.status, b.status, 'SHIPPED') AS tag_status,
+          CASE
+            WHEN sm.tag_id IS NOT NULL THEN EXISTS (
+              SELECT 1
+              FROM public.stock_movements rm
+              WHERE rm.movement_type = 'RETURN_RESTOCK'
+                AND rm.reference_doc = sm.reference_doc
+                AND rm.tag_id = sm.tag_id
+            )
+            ELSE FALSE
+          END AS already_returned
         FROM public.stock_movements sm
-        INNER JOIN public.tags t ON t.id = sm.tag_id
+        LEFT JOIN public.tags t ON t.id = sm.tag_id
         LEFT JOIN public.products p ON p.id = sm.product_id
+        LEFT JOIN public.boxes b
+          ON sm.tag_id IS NULL
+         AND b.box_code = substring(sm.qty_label FROM '\(([^)]+)\)')
         WHERE sm.movement_type = 'POS_SALE'
           AND sm.reference_doc = $1
         ORDER BY sm.created_at ASC
@@ -1130,6 +1149,7 @@ if (
                 item.tag_status === 'AUTHORIZED_OUT'
             )
             .map((item: any) => item.epc);
+          remainingEpcs.push(...await pendingPosBoxEpcs(client, invoiceNo));
 
           const needsReplacementGatePass = remainingEpcs.length > 0;
 
@@ -1527,6 +1547,7 @@ if (pendingFollowUp) {
             item.tag_status === 'AUTHORIZED_OUT'
         )
         .map((item: any) => item.epc);
+      recoveryEpcs.push(...await pendingPosBoxEpcs(client, invoiceNo));
 
       if (recoveryEpcs.length > 0) {
         const recoveryResponse = await app.inject({

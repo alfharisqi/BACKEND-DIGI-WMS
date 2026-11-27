@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { PackingChecklist, PickingError, packingFields } from './contract';
 import type { WarehouseSession } from '../warehouse-session';
 import { selectOrders, verifyPickingAccount } from './repository';
+import { recordGateAuthorization } from '../gate-authorization';
 
 interface SavedPacking extends PackingChecklist {
   status: 'MENUNGGU_PACKING' | 'SELESAI_PACKING';
@@ -110,8 +111,10 @@ export class PackingRepository {
       const actor = await verifyPickingAccount(db, session, true);
       const actorId = session.id;
       // Picking, checklist saves, and finalization share this serialization point.
-      const order = await db.query('SELECT id FROM public.picking_orders WHERE id = $1 FOR UPDATE', [orderId]);
-      if (!order.rowCount) throw new PickingError(404, 'Pesanan picking tidak ditemukan.');
+      const { rows: [order] } = await db.query<{ status: string }>(
+        'SELECT status FROM public.picking_orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (!order) throw new PickingError(404, 'Pesanan picking tidak ditemukan.');
+      if (order.status === 'DIBATALKAN') throw new PickingError(409, 'Pesanan yang dibatalkan tidak dapat dipacking.');
       const saved = await savedPacking(db, orderId);
       if (saved?.status === 'SELESAI_PACKING') {
         if (change.action === 'PACKING_COMPLETED') return packingView(db, orderId);
@@ -179,11 +182,12 @@ export class PackingRepository {
 
           if (existingPass.rowCount === 0) {
             const passCode = `GP-PACK-${Math.floor(1000 + Math.random() * 9000)}`;
-            await db.query(
+            const { rows: [createdPass] } = await db.query<{ id: string }>(
               `INSERT INTO public.gate_passes (pass_code, reference_resi, authorized_by, status, valid_until, created_at)
-               VALUES ($1, $2, $3, 'ACTIVE', now() + interval '24 hours', now())`,
+               VALUES ($1, $2, $3, 'ACTIVE', now() + interval '24 hours', now()) RETURNING id`,
               [passCode, refResi, actorId]
             );
+            await recordGateAuthorization(db, createdPass.id, scannedRows.map(({ epc, tag_id }) => ({ epc, tag_id })), refResi);
           }
         }
       } else {

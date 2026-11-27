@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { warehouseSession } from '../warehouse-session';
 import { db } from '../../config/db';
-import { PickingError, checklistInput, orderIdInput, packingRevision, scanInput, statusInput } from './contract';
+import { PickingError, ScanRejected, cancellationInput, checklistInput, createOrderInput, orderIdInput, packingRevision, productIdInput, scanInput, statusInput } from './contract';
 import { PackingRepository } from './packing';
 import { PickingRepository } from './repository';
 
@@ -13,7 +13,7 @@ function failure(request: FastifyRequest, reply: FastifyReply, error: unknown) {
   if (error instanceof PickingError) {
     return reply.code(error.statusCode).send({ success: false, message: error.message });
   }
-  const code = (error as { code?: string }).code ?? '';
+  const code = (error as { code?: string } | null)?.code ?? '';
   if (['23505', '23503', '40P01', '40001', '55P03'].includes(code)) {
     return reply.code(409).send({ success: false, message: 'Reservasi berbenturan dengan transaksi lain. Muat ulang data sebelum mencoba lagi.' });
   }
@@ -32,7 +32,9 @@ interface PickingOptions {
 }
 
 export async function orang1PickingRoutes(app: FastifyInstance, options: PickingOptions = {}) {
-  const repository = options.repository ?? new PickingRepository(db);
+  const repository = options.repository ?? new PickingRepository(db, {
+    cancellationApproved: process.env.DIGI_WMS_PICKING_CANCELLATION_APPROVED?.trim().toLowerCase() !== 'false',
+  });
   const packing = options.packing ?? new PackingRepository(db);
   app.get('/api/picking/orders', async (request, reply) => {
     try {
@@ -46,56 +48,36 @@ export async function orang1PickingRoutes(app: FastifyInstance, options: Picking
   app.post('/api/picking/orders', async (request, reply) => {
     try {
       const session = pickingSession(request);
-      const body = (request.body ?? {}) as {
-        order_number?: string;
-        lines?: Array<{ product_id?: string; requested_qty?: number }>;
-      };
-      const orderNumber = String(body.order_number ?? '').trim();
-      const lines = Array.isArray(body.lines) ? body.lines : [];
-      if (!orderNumber || orderNumber.length > 80) {
-        throw new PickingError(400, 'Nomor pesanan picking wajib diisi (maks 80 karakter).');
-      }
-      if (!lines.length) {
-        throw new PickingError(400, 'Minimal 1 baris produk/SKU wajib dipilih untuk pesanan picking.');
-      }
-      const client = await db.connect();
-      try {
-        await client.query('BEGIN');
-        const orderRes = await client.query(
-          `INSERT INTO public.picking_orders (order_number, status)
-           VALUES ($1, 'MENUNGGU_PICKING')
-           RETURNING id`,
-          [orderNumber]
-        );
-        const orderId = orderRes.rows[0].id;
-        for (const l of lines) {
-          const qty = Number(l.requested_qty ?? 1);
-          if (!l.product_id || !Number.isInteger(qty) || qty <= 0) {
-            throw new PickingError(400, 'Pilih produk dan jumlah unit yang valid (> 0).');
-          }
-          await client.query(
-            `INSERT INTO public.picking_order_lines (order_id, product_id, requested_qty)
-             VALUES ($1, $2, $3)`,
-            [orderId, l.product_id, qty]
-          );
-        }
-        await client.query('COMMIT');
-        const allOrders = await repository.orders(null, session);
-        const created = allOrders.find((o: any) => o.id === orderId) || { id: orderId, order_number: orderNumber };
-        return reply.code(201).send({
-          success: true,
-          message: `Pesanan picking ${orderNumber} berhasil dibuat!`,
-          data: created,
-        });
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw err;
-      } finally {
-        client.release();
-      }
+      const input = createOrderInput(request.body);
+      const data = await repository.create(input, session);
+      return reply.code(201).send({
+        success: true, message: `Pesanan picking ${input.orderNumber} berhasil dibuat!`, data,
+      });
     } catch (error) {
       return failure(request, reply, error);
     }
+  });
+  app.get<{ Querystring: { product_id?: string } }>('/api/picking/availability', async (request, reply) => {
+    try {
+      const session = pickingSession(request);
+      const data = await repository.availability(productIdInput(request.query.product_id), session);
+      return { success: true, message: 'Stok tersedia untuk Picking.', data };
+    } catch (error) { return failure(request, reply, error); }
+  });
+  app.get<{ Params: { orderId: string } }>('/api/picking/orders/:orderId/available-epcs', async (request, reply) => {
+    try {
+      const session = pickingSession(request);
+      const data = await repository.availableEpcs(orderIdInput(request.params.orderId), session);
+      return { success: true, message: 'Daftar EPC tersedia untuk Picking.', data };
+    } catch (error) { return failure(request, reply, error); }
+  });
+  app.post<{ Params: { orderId: string } }>('/api/picking/orders/:orderId/cancel', async (request, reply) => {
+    try {
+      const session = pickingSession(request);
+      const orderId = orderIdInput(request.params.orderId);
+      const data = await repository.cancel(orderId, cancellationInput(request.body), session);
+      return { success: true, message: 'Pesanan picking dibatalkan.', data };
+    } catch (error) { return failure(request, reply, error); }
   });
   app.post('/api/picking/scan', async (request, reply) => {
     try {
@@ -104,6 +86,9 @@ export async function orang1PickingRoutes(app: FastifyInstance, options: Picking
       const data = await repository.reserve(orderId, epc, session);
       return { success: true, message: 'EPC cocok. Tag dan item berhasil direservasi.', data };
     } catch (error) {
+      if (error instanceof ScanRejected) {
+        return reply.code(error.statusCode).send({ success: false, message: error.message, code: 'PICKING_SCAN_REJECTED' });
+      }
       return failure(request, reply, error);
     }
   });
